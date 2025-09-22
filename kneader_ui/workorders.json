@@ -1,0 +1,246 @@
+[
+  {
+    "workorder_id": "WO121",
+    "name": "Rubber Compound Batch #1",
+    "steps": [
+      {
+        "step_id": 1,
+        "mix_time_sec": 60,
+        "items": [
+          {
+            "item_id": "CHEM001",
+            "name": "Carbon Black",
+            "required_weight": 5.0
+          },
+          {
+            "item_id": "CHEM002",
+            "name": "Sulphur",
+            "required_weight": 1.2
+          },
+          {
+            "item_id": "CHEM003",
+            "name": "Oil",
+            "required_weight": 3.5
+          },
+          {
+            "item_id": "CHEM004",
+            "name": "Polymer Base",
+            "required_weight": 20.0
+          }
+        ]
+      },
+      {
+        "step_id": 2,
+        "mix_time_sec": 45,
+        "items": [
+          {
+            "item_id": "CHEM005",
+            "name": "Antioxidant",
+            "required_weight": 0.5
+          },
+          {
+            "item_id": "CHEM006",
+            "name": "Accelerator",
+            "required_weight": 0.8
+          },
+          {
+            "item_id": "CHEM007",
+            "name": "Filler A",
+            "required_weight": 4.5
+          },
+          {
+            "item_id": "CHEM008",
+            "name": "Filler B",
+            "required_weight": 2.0
+          }
+        ]
+      },
+      {
+        "step_id": 3,
+        "mix_time_sec": 30,
+        "items": [
+          {
+            "item_id": "CHEM009",
+            "name": "Color Pigment",
+            "required_weight": 0.3
+          },
+          {
+            "item_id": "CHEM010",
+            "name": "Softener",
+            "required_weight": 1.0
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "workorder_id": "WO122",
+    "name": "Rubber Compound Batch #3",
+    "steps": [
+      {
+        "step_id": 1,
+        "mix_time_sec": 20,
+        "items": [
+          {
+            "item_id": "CHEM021",
+            "name": "Carbon Black",
+            "required_weight": 5.0
+          },
+          {
+            "item_id": "CHEM022",
+            "name": "Sulphur",
+            "required_weight": 1.2
+          },
+          {
+            "item_id": "CHEM023",
+            "name": "Oil",
+            "required_weight": 3.5
+          },
+          {
+            "item_id": "CHEM024",
+            "name": "Polymer Base",
+            "required_weight": 20.0
+          }
+        ]
+      },
+      {
+        "step_id": 2,
+        "mix_time_sec": 25,
+        "items": [
+          {
+            "item_id": "CHEM015",
+            "name": "Color Pigment",
+            "required_weight": 0.3
+          },
+          {
+            "item_id": "CHEM026",
+            "name": "Softener",
+            "required_weight": 1.0
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "workorder_id": "WO123",
+    "name": "Rubber Compound Batch #5",
+    "steps": [
+      {
+        "step_id": 1,
+        "mix_time_sec": 20,
+        "items": [
+          {
+            "item_id": "CHEM031",
+            "name": "Carbon Black",
+            "required_weight": 5.0
+          },
+          {
+            "item_id": "CHEM032",
+            "name": "Sulphur",
+            "required_weight": 1.2
+          },
+          {
+            "item_id": "CHEM033",
+            "name": "Oil",
+            "required_weight": 3.5
+          },
+          {
+            "item_id": "CHEM034",
+            "name": "Polymer Base",
+            "required_weight": 20.0
+          }
+        ]
+      },
+      {
+        "step_id": 2,
+        "mix_time_sec": 45,
+        "items": [
+          {
+            "item_id": "CHEM035",
+            "name": "Antioxidant",
+            "required_weight": 0.5
+          },
+          {
+            "item_id": "CHEM036",
+            "name": "Accelerator",
+            "required_weight": 0.8
+          },
+          {
+            "item_id": "CHEM037",
+            "name": "Filler A",
+            "required_weight": 4.5
+          },
+          {
+            "item_id": "CHEM038",
+            "name": "Filler B",
+            "required_weight": 2.0
+          }
+        ]
+      },
+      {
+        "step_id": 3,
+        "mix_time_sec": 30,
+        "items": [
+          {
+            "item_id": "CHEM039",
+            "name": "Color Pigment",
+            "required_weight": 0.3
+          },
+          {
+            "item_id": "CHEM040",
+            "name": "Softener",
+            "required_weight": 1.0
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "workorder_id": "WO124",
+    "name": "Rubber Compound Batch #3",
+    "steps": [
+      {
+        "step_id": 1,
+        "mix_time_sec": 20,
+        "items": [
+          {
+            "item_id": "CHEM041",
+            "name": "Carbon Black",
+            "required_weight": 5.0
+          },
+          {
+            "item_id": "CHEM042",
+            "name": "Sulphur",
+            "required_weight": 1.2
+          },
+          {
+            "item_id": "CHEM043",
+            "name": "Oil",
+            "required_weight": 3.5
+          },
+          {
+            "item_id": "CHEM044",
+            "name": "Polymer Base",
+            "required_weight": 20.0
+          }
+        ]
+      },
+      {
+        "step_id": 2,
+        "mix_time_sec": 25,
+        "items": [
+          {
+            "item_id": "CHEM045",
+            "name": "Color Pigment",
+            "required_weight": 0.3
+          },
+          {
+            "item_id": "CHEM046",
+            "name": "Softener",
+            "required_weight": 1.0
+          }
+        ]
+      }
+    ]
+  }
+]   
