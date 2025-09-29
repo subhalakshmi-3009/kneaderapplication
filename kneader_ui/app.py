@@ -43,6 +43,9 @@ class ControllerClient:
             if not self.connect():
                 return {"error": "Cannot connect to controller"}
         try:
+            if command.get("command") == "scan_item":
+                command["_via_hmi"] = True  # marker so controller knows to route it
+
             message = json.dumps(command) + "\n"
             with self.lock:
                 try:
@@ -109,14 +112,18 @@ config_path = os.path.join(parent_dir, './kneader/config.ini')
 
 config = configparser.ConfigParser()
 config.read(config_path)
-workorders_file = config["files"]["workorder_config_file"]
+compound_workorders_file = config["files"]["compound_workorder_file"]
+master_workorders_file   = config["files"]["master_workorder_file"]
 
-def load_workorders():
+
+def load_workorders(batch_type="compound"):
+    file_path = compound_workorders_file if batch_type == "compound" else master_workorders_file
     try:
-        with open(workorders_file, "r") as f:
+        with open(file_path, "r") as f:
             return json.load(f)
     except FileNotFoundError:
         return None
+
 
 @app.route('/')
 def serve_ui():
@@ -127,25 +134,46 @@ def load_workorder():
     try:
         data = request.json
         batchNumber = data.get('batchNumber')
-        workorders = load_workorders()
+        batchType   = data.get('batchType', 'compound')  # default to compound
+
+        # Decide which file to load
+        if batchType == 'master':
+            workorder_file = r"C:/Users/rkann/config_files/workordersmb.json"
+        else:
+            workorder_file = r"C:/Users/rkann/config_files/workorders.json"
+
+        # Load from correct file
+        with open(workorder_file, 'r') as f:
+            workorders = json.load(f)
+
+        # Search batch
         selected_workorder = None
         for wo in workorders:
             if wo.get("batch_number") == batchNumber:
                 selected_workorder = wo["workorder"]
                 break
+
         if not selected_workorder:
             return jsonify({"status": "fail", "message": "Workorder not found"})
+
+        # Send to controller
         response = controller.send_command({
             "command": "load_workorder",
             "data": selected_workorder
         })
         if response and not response.get("error"):
-            return jsonify({"status": "success", "message": "Workorder loaded for pre-scanning", "workorder": selected_workorder})
+            return jsonify({
+                "status": "success",
+                "message": f"{batchType.capitalize()} Workorder loaded for pre-scanning",
+                "workorder": selected_workorder
+            })
         else:
             error_msg = response.get("error", "Failed to load workorder") if response else "Failed to load workorder"
             return jsonify({"status": "fail", "message": error_msg})
+
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route('/api/prescan', methods=['POST'])
 def prescan_item():
@@ -166,12 +194,13 @@ def prescan_item():
 def confirm_prescan():
     try:
         response = controller.send_command({"command": "confirm_start"})
-        if response and response.get("status") == "success":
-            return jsonify({"status": "success", "message": "Pre-scanning confirmed"})
+        if response and not response.get("error"):
+            return jsonify(response)
         else:
-            return jsonify({"status": "fail", "message": response.get("message", "Failed to confirm prescan") if response else "Failed to confirm prescan"})
+            return jsonify({"status": "fail", "message": response.get("error", "Failed to confirm prescan") if response else "Failed to confirm prescan"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route('/api/scan', methods=['POST'])
 def scan_item():
@@ -180,19 +209,19 @@ def scan_item():
         barcode = data.get('barcode')
         if not barcode:
             return jsonify({"status": "fail", "message": "No barcode provided"})
-        
+
         # Get current status
         status_response = controller.send_command({"command": "get_status"})
         current_state = status_response.get("process_state", "IDLE") if status_response else "IDLE"
 
         if current_state == "PRESCANNING":
             return prescan_item()
-        elif current_state == "WAITING_FOR_ITEMS":
+        elif current_state in ("WAITING_FOR_ITEMS", "MIXING"):
             scan_response = controller.send_command({"command": "scan_item", "data": {"barcode": barcode}})
             return jsonify(scan_response)
         else:
             return jsonify({
-                "status": "fail", 
+                "status": "fail",
                 "message": f"Cannot scan in current state: {current_state}. Please wait for the current operation to complete."
             })
     except Exception as e:
@@ -207,6 +236,48 @@ def get_status():
             return jsonify({"process_state": "IDLE", "error_message": response.get("error", "Controller not responding") if response else "Controller not responding"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/abort', methods=['POST'])
+def abort_process():
+    try:
+        response = controller.send_command({"command": "abort"})
+        if response and not response.get("error"):
+            return jsonify({"status": "success", "message": "Process aborted"})
+        else:
+            return jsonify({"status": "fail", "message": response.get("error", "Failed to abort")})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/resume', methods=['POST'])
+def resume_process():
+    try:
+        response = controller.send_command({"command": "resume"})
+        if response and not response.get("error"):
+            return jsonify({"status": "success", "message": "Process resumed"})
+        else:
+            return jsonify({"status": "fail", "message": response.get("error", "Failed to resume")})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+@app.route('/api/confirm_completion', methods=['POST'])
+def confirm_completion():
+    try:
+        response = controller.send_command({"command": "confirm_completion"})
+        return jsonify({"status": "success", "message": "Controller reset after completion", "data": response})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+@app.route('/api/reset', methods=['POST'])
+def reset_process():
+    try:
+        response = controller.send_command({"command": "reset"})
+        if response and not response.get("error"):
+            return jsonify({"status": "success", "message": "Process reset"})
+        else:
+            return jsonify({"status": "fail", "message": response.get("error", "Failed to reset")})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000, host='0.0.0.0')

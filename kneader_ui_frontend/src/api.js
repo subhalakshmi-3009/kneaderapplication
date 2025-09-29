@@ -26,17 +26,19 @@ export const scanItem = (barcode) => {
 }
 
 export const abortProcess = () => {
-  return api.post('/control/abort').then(response => response.data)
+  return api.post('/abort').then(response => response.data)
 }
 
 export const resumeProcess = () => {
-  return api.post('/control/resume').then(response => response.data)
+  return api.post('/resume').then(response => response.data)
 }
 
 
-export const resetController = () => {
-  return api.post('/control/reset').then(response => response.data)
+
+export const resetProcess = () => {
+  return api.post('/reset').then(response => response.data)
 }
+
 
 export const getWorkorders = () => {
   return api.get('/workorders').then(response => response.data)
@@ -47,19 +49,27 @@ export const checkTransitions = () => {
 }
 // Add these to your api.js file
 export const getBatches = () => {
-  return api.get('/batches/:batch_number').then(response => response.data);
+  return api.get(`/batches/${batch_number}`).then(response => response.data);
 };
 
-export const loadWorkorder = (batch_number) => {
-  alert("posting")
-  return api.post('/load_workorder', { 'batchNumber': batch_number })
+export const loadWorkorder = ({ batchNumber, batchType }) => {
+  return api.post('/load_workorder', { batchNumber, batchType })
     .then(response => response.data)
     .catch(error => {
       console.error('API Error loading workorder:', error);
-
       return { status: 'error', message: 'Failed to load workorder' };
     });
 };
+export const confirmCompletion = () => {
+  return api.post('/confirm_completion')
+    .then(response => response.data)
+    .catch(error => {
+      console.error('API Error confirming completion:', error);
+      return { status: 'error', message: 'Failed to confirm completion' };
+    });
+};
+
+
 export const prescanItem = (barcode) => {
   return api.post('/prescan', { 'barcode':barcode }).then(response => response.data);
 };

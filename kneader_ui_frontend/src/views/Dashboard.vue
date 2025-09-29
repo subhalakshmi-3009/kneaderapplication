@@ -1,9 +1,22 @@
 <template>
   <div class="dashboard">
 
-    <!-- INITIAL: only batch-number entry screen -->
-    <div class="batch-panel" v-if="showBatchSelection">
-      <h2>Enter Batch Number</h2>
+    <!-- FIRST SCREEN: select batch type -->
+    <div class="batch-panel" v-if="!batchType">
+      <h2>Select Batch Type</h2>
+      <div style="display:flex; gap:20px; justify-content:center; margin-top:1rem;">
+        <div class="batch-option" @click="selectBatchType('master')">
+          MASTER BATCH
+        </div>
+        <div class="batch-option" @click="selectBatchType('compound')">
+          COMPOUND BATCH
+        </div>
+      </div>
+    </div>
+
+    <!-- SECOND SCREEN: enter batch number -->
+    <div class="batch-panel" v-else-if="showBatchSelection">
+      <h2>Enter Batch Number for {{ batchType.toUpperCase() }}</h2>
       <div class="batch-input" style="display:flex; gap:8px; align-items:center;">
         <input
           type="text"
@@ -15,41 +28,150 @@
         />
         <button @click="loadBatchByNumber" class="btn">Load</button>
       </div>
-      <p style="margin-top:0.5rem; color:#666; font-size:0.95rem;">
-        After loading a valid batch, prescanning screen will open.
-      </p>
     </div>
 
     <!-- PRESCANNING PANEL -->
-    <div class="prescan-panel" v-if="showPrescanning && workorder">
-      <h2>Pre-scanning: {{ selectedBatch ? selectedBatch.name : workorder.name }}</h2>
+    <div class="prescan-panel" v-if="workorder && workorder.steps">
+      <h2>{{ selectedBatch ? selectedBatch.name : workorder.name }}</h2>
 
-      <div class="prescan-status">
-        <div class="progress">
-          <div class="progress-bar" :style="{ width: prescanProgress + '%' }"></div>
-          <span class="progress-text">{{ scannedItemsCount }} / {{ totalItemsCount }} items scanned</span>
-        </div>
+      <!-- Status line -->
+      <div class="status-line">
+        {{ getStatusMessage() }}
       </div>
 
-      <div class="items-list">
-        <div v-for="(step, idx) in workorder.steps" :key="step.step_id || idx">
-          <h3>Step {{ idx + 1 }}</h3>
-          <div
-            v-for="item in step.items"
-            :key="item.item_id"
-            :class="['item', getItemStatus(item.item_id)]"
-          >
-            <span class="item-name">{{ item.name }}</span>
-            <span class="item-id">{{ item.item_id }}</span>
-            <span class="status-indicator" :class="getItemStatus(item.item_id)">{{ getItemStatus(item.item_id) }}</span>
-          </div>
-        </div>
-      </div>
+      <!-- Excel-style prescan table -->
+      <table class="prescan-table">
+        <thead>
+          <tr>
+            <th>Stage No.</th>
+            <th>Item</th>
+            <th>Mixing Time</th>
+            <th>Prescan</th>
+            <th>Live Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template v-for="(step, stepIndex) in status.steps" :key="step.step_id || stepIndex">
+            <!-- First row of step -->
+            <tr>
+              <td :rowspan="step.items.length">{{ stepIndex + 1 }}</td>
+              <td>{{ step.items[0].item_id }}</td>
 
-      <!-- Prescan-only scanner -->
+              <!-- Mixing Time -->
+              <td :rowspan="step.items.length">
+                <!-- Freeze at 0 once this step is finished OR when process is complete -->
+                <span v-if="status.process_state === 'PROCESS_COMPLETE' ||
+                            status.current_step_index > stepIndex ||
+                            (status.current_step_index === stepIndex && status.mixing_time_remaining === 0)">
+                  0s
+                </span>
+
+                <!-- Current step: show live countdown or paused time -->
+                <span v-else-if="status.current_step_index === stepIndex &&
+                                (status.process_state === 'MIXING' || status.process_state === 'ABORTED')">
+                  {{ status.mixing_time_remaining }}s
+                </span>
+
+                <!-- Future step -->
+                <span v-else>
+                  {{ formatMixTime(step.mix_time_sec) }}
+                </span>
+              </td>
+
+              <!-- Prescan -->
+              <td>
+                <span v-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'SCANNED'" style="color: green;">
+                  SCANNED
+                </span>
+                <span v-else-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'PENDING'" >
+                  PENDING
+                </span>
+                <span v-else-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'DONE'" style="color: gray; font-weight: bold;">
+                  DONE
+                </span>
+                <span v-else>
+                  {{ getItemStatus(step.items[0].item_id).toUpperCase() }}
+                </span>
+              </td>
+
+              <!-- Live Status -->
+              <td>
+                <!-- If this is the NEXT step and some items already scanned while mixing -->
+                <span v-if="stepIndex === status.current_step_index + 1 && step.items[0].live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
+                  SCANNED
+                </span>
+                <!-- Normal flow -->
+                <span v-else-if="step.items[0].live_status === 'READY_TO_LOAD'" style="color: blue; ">
+                  READY TO LOAD
+                </span>
+                <span v-else-if="step.items[0].live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
+                  SCANNED
+                </span>
+                <span v-else-if="step.items[0].live_status === 'MIXING'" style="color: green; font-weight: bold;">
+                  MIXING
+                </span>
+                <span v-else-if="step.items[0].live_status === 'DONE'" style="color: gray; font-weight: bold;">
+                  DONE
+                </span>
+                <span v-else>
+                  {{ (step.items[0].live_status || 'WAITING').toUpperCase() }}
+                </span>
+              </td>
+            </tr>
+
+            <!-- Remaining items -->
+            <tr v-for="item in step.items.slice(1)" :key="item.item_id">
+              <td>{{ item.item_id }}</td>
+
+              <!-- Prescan -->
+              <td>
+                <span v-if="getItemStatus(item.item_id).toUpperCase() === 'SCANNED'" style="color: green;">
+                  SCANNED
+                </span>
+                <span v-else-if="getItemStatus(item.item_id).toUpperCase() === 'PENDING'" >
+                  PENDING
+                </span>
+                <span v-else-if="getItemStatus(item.item_id).toUpperCase() === 'DONE'" style="color: gray; font-weight: bold;">
+                  DONE
+                </span>
+                <span v-else>
+                  {{ getItemStatus(item.item_id).toUpperCase() }}
+                </span>
+              </td>
+
+              <!-- Live Status -->
+              <td>
+                <!-- Allow future step items to show SCANNED while current is mixing -->
+                <span v-if="stepIndex === status.current_step_index + 1 && item.live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
+                  SCANNED
+                </span>
+                <!-- Normal flow -->
+                <span v-else-if="item.live_status === 'READY_TO_LOAD'" style="color: blue; ">
+                  READY TO LOAD
+                </span>
+                <span v-else-if="item.live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
+                  SCANNED
+                </span>
+                <span v-else-if="item.live_status === 'MIXING'" style="color: green; font-weight: bold;">
+                  MIXING
+                </span>
+                <span v-else-if="item.live_status === 'DONE'" style="color: gray; font-weight: bold;">
+                  DONE
+                </span>
+                <span v-else>
+                  {{ (item.live_status || 'WAITING').toUpperCase() }}
+                </span>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+
+      <!-- Scanner Panel -->
       <div class="scanner-panel">
-        <h3>Scan Item (Prescan)</h3>
-        <div class="scanner-input">
+        <!-- Prescan Input -->
+        <div v-if="status.process_state === 'PRESCANNING'">
+          <h3>Scan Item (Prescan)</h3>
           <input
             type="text"
             v-model="barcode"
@@ -59,121 +181,58 @@
           />
         </div>
 
-        <div v-if="scanResult" :class="['scan-result', scanResult.status]">
-          {{ scanResult.message }}
+        <!-- Actual Scan Input -->
+        <div v-else-if="status.process_state === 'WAITING_FOR_ITEMS' || status.process_state === 'MIXING'">
+          <h3>Scan Item (Actual)</h3>
+          <input
+            type="text"
+            v-model="barcode"
+            placeholder="Scan item barcode (actual)"
+            @keyup.enter="handleScan"
+            ref="barcodeInput"
+          />
         </div>
-      </div>
 
-      <!-- Confirmation Dialog -->
-      <div class="confirmation-dialog" v-if="prescanComplete">
-        <div class="dialog-content">
-          <h3>Pre-scanning Complete!</h3>
-          <p>All items have been scanned successfully.</p>
-          <button @click="confirmPrescan" class="btn btn-primary">OK — Start Mixing</button>
+        <!-- Abort / Resume Buttons -->
+        <div class="control-buttons" style="margin-top: 1rem; text-align: center;">
+          <!-- Abort button -->
+          <button
+            v-if="['MIXING', 'WAITING_FOR_ITEMS', 'READY_TO_LOAD'].includes(status.process_state)"
+            @click="abortProcess"
+            class="btn btn-danger"
+          >
+            Abort
+          </button>
+
+          <!-- Resume button -->
+          <button
+            v-if="status.process_state === 'ABORTED'"
+            @click="resumeProcess"
+            class="btn btn-success"
+          >
+            Resume
+          </button>
         </div>
       </div>
     </div>
 
-    <div class="status-panel" v-if="!showBatchSelection && !showPrescanning && status.process_state !== 'IDLE'">
-      <h2>System Status</h2>
-      <div class="status-info">
-        <div class="status-item">
-          <span class="label">Workorder ID:</span>
-          <span class="value">{{ status.workorder_id }}</span>
-        </div>
-        <div class="status-item">
-          <span class="label">Process State:</span>
-          <span class="value">{{ status.process_state }}</span>
-        </div>
-        <div class="status-item">
-          <span class="label">Current Stage:</span>
-          <span class="value">{{ status.current_step_index + 1 }} of {{ status.total_steps }}</span>
-        </div>
-        <div class="status-item">
-          <span class="label">Lid Status:</span>
-          <span :class="['value', status.lid_open ? 'open' : 'closed']">
-            {{ status.lid_open ? 'Open' : 'Closed' }}
-          </span>
-        </div>
-        <div class="status-item">
-          <span class="label">Motor Status:</span>
-          <span :class="['value', status.motor_running ? 'running' : 'stopped']">
-            {{ status.motor_running ? 'Running' : 'Stopped' }}
-          </span>
-        </div>
-        <div class="status-item" v-if="status.process_state === 'MIXING'">
-          <span class="label">Time Remaining:</span>
-          <span class="value">{{ formatTime(status.mixing_time_remaining) }}</span>
-        </div>
-        <div class="status-item" v-if="status.process_state === 'ABORTED'">
-          <span class="label">Paused Time Remaining:</span>
-          <span class="value">{{ formatTime(status.mixing_time_remaining) }}</span>
-        </div>
-      </div>
-
-      <div class="control-buttons">
-        <button v-if="status.process_state === 'MIXING'" @click="abortProcess" class="btn btn-danger">Abort</button>
-        <button v-if="status.process_state === 'ABORTED'" @click="resumeProcess" class="btn btn-warning">Resume</button>
-        <button v-if="status.process_state === 'PROCESS_COMPLETE'" @click="resetController" class="btn btn-primary">Reset</button>
-      </div>
-      
-      <!-- Progress bar for mixing -->
-      <div v-if="status.process_state === 'MIXING'" class="mixing-progress">
-        <div class="progress">
-          <div class="progress-bar" :style="{ width: mixingProgress + '%' }"></div>
-          <span class="progress-text">Mixing: {{ mixingProgress }}% complete</span>
-        </div>
-      </div>
-    </div>
-    <div class="scanner-panel" v-if="!showBatchSelection && !showPrescanning" 
-         :class="{ centered: status.process_state === 'IDLE' || status.process_state === 'PROCESS_COMPLETE' }">
-      <h3>Enter Item Code</h3>
-      <div class="scanner-input">
-        <input
-          type="text"
-          v-model="barcode"
-          placeholder="Type item code and press Enter"
-          @keyup.enter="handleScan"
-          ref="barcodeInput"
-          :disabled="!canScan"
-        />
-      </div>
-
-      <div v-if="scanResult" :class="['scan-result', scanResult.status]">
-        {{ scanResult.message }}
-      </div>
-
-      <div v-if="status.process_state === 'IDLE'" class="idle-message">
-        <p>Load a workorder to begin</p>
-      </div>
-      <div v-if="status.process_state === 'PROCESS_COMPLETE'" class="idle-message">
-        <div class="completion-message"><p><strong>Process Complete!</strong></p></div>
-      </div>
-      <div v-if="status.process_state === 'WAITING_FOR_ITEMS'" class="waiting-message">
-        <p>Enter the next item code for the current stage</p>
-      </div>
-      <div v-if="status.process_state === 'MIXING'" class="waiting-message">
-        <p>Mixing in progress - please wait</p>
-      </div>
-      <div v-if="status.process_state === 'WAITING_FOR_LID_CLOSE'" class="waiting-message">
-        <p>Waiting for lid to close</p>
-      </div>
-      <div v-if="status.process_state === 'WAITING_FOR_MOTOR_START'" class="waiting-message">
-        <p>Waiting for motor to start</p>
+    <!-- Confirmation Dialog -->
+    <div class="confirmation-dialog" v-if="showPrescanCompletePopup">
+      <div class="dialog-content">
+        <h3>Pre-scanning Complete!</h3>
+        <p>All items have been scanned successfully.</p>
+        <button @click="confirmPrescan" class="btn btn-primary">OK</button>
       </div>
     </div>
 
-
-    <!-- Debug Info -->
-    <div class="debug-info" v-if="debugMode">
-      <h3>Debug Information</h3>
-      <p>Current State: {{ status.process_state }}</p>
-      <p>Barcode: {{ barcode }}</p>
-      <p>Last Result: {{ scanResult }}</p>
-      <p>Workorder: {{ workorder ? workorder.workorder_id : 'None' }}</p>
-      <button @click="debugMode = !debugMode">Hide Debug</button>
+    <!-- Process Complete Dialog -->
+    <div class="completion-popup" v-if="showCompletionPopup">
+      <div class="popup-content">
+        <h3>Process Complete!</h3>
+        <button @click="handleCompletionOk" class="btn btn-primary">OK</button>
+      </div>
     </div>
-    <button v-else @click="debugMode = true" class="btn-debug">Show Debug</button>
+
   </div>
 </template>
 
@@ -183,12 +242,14 @@ import {
   scanItem,
   abortProcess,
   resetController,
+  resetProcess,
   getWorkorders,
   checkTransitions,
   resumeProcess,
   getBatches,
   loadWorkorder,
   confirmPrescanAPI,
+  confirmCompletion,
   prescanItem
 } from '@/api'
 
@@ -196,6 +257,10 @@ export default {
   name: 'Dashboard',
   data() {
     return {
+      batchType: null,  // "master" or "compound"
+      showPrescanCompletePopup: false,
+      showCompletionPopup: false,
+
       showConfirmPopup: false,
       batches: [],
       enteredBatchNumber: '',
@@ -203,7 +268,13 @@ export default {
       workorder: null,
       showBatchSelection: true,
       showPrescanning: false,
+      prescanResults: {}, 
+      
       prescanComplete: false,
+      actualScanning: false,
+      mixing: false,
+      mixingTimer: 0,
+      mixingInterval: null,
       scannedItems: [],
       status: {
         process_state: 'IDLE',
@@ -223,7 +294,8 @@ export default {
       debugMode: false,
       statusInterval: null,
       transitionInterval: null,
-      showingCompletion: false
+      showingCompletion: false,
+      autoTransitionTimeout: null
     }
   },
   computed: {
@@ -231,11 +303,12 @@ export default {
       return this.scannedItems.length;
     },
     currentStepItems() {
-    if (this.status.steps && this.status.current_step_index < this.status.steps.length) {
-      return this.status.steps[this.status.current_step_index].items || [];
-    }
-    return [];
-  },
+      if (this.status.steps && this.status.current_step_index < this.status.steps.length) {
+        return this.status.steps[this.status.current_step_index].items || [];
+      }
+      return [];
+    },
+   
 
     totalItemsCount() {
       if (!this.workorder || !this.workorder.steps) return 0;
@@ -245,21 +318,24 @@ export default {
       if (this.totalItemsCount === 0) return 0;
       return Math.round((this.scannedItemsCount / this.totalItemsCount) * 100);
     },
-     canScan() {
-    return this.status.process_state === 'WAITING_FOR_ITEMS' || 
-           this.status.process_state === 'PRESCANNING';
-  }
+    canScan() {
+      return this.status.process_state === 'WAITING_FOR_ITEMS' || 
+             this.status.process_state === 'PRESCANNING';
+    }
   },
   async mounted() {
+    console.log('Mounted, showBatchSelection:', this.showBatchSelection);
     await this.loadBatches();
     await this.loadWorkorders();
-    this.startStatusPolling() 
     this.startPolling();
     this.$nextTick(() => {
       if (this.$refs.batchInput) this.$refs.batchInput.focus();
     });
   },
   beforeUnmount() {
+    if (this.autoTransitionTimeout) {
+      clearTimeout(this.autoTransitionTimeout);
+    }
     this.stopPolling();
   },
   watch: {
@@ -273,9 +349,19 @@ export default {
         this.scanResult = null;
         this.barcode = '';
       }
+    },
+    prescanComplete(newVal) {
+      if (newVal) {
+        this.initiateAutoTransition();
+      }
     }
   },
   methods: {
+    selectBatchType(type) {
+  this.batchType = type;       // "master" or "compound"
+  this.showBatchSelection = true;
+},
+
     async loadBatches() {
       try {
         const response = await getBatches();
@@ -285,25 +371,58 @@ export default {
         console.error('Failed to load batches:', error);
       }
     },
+    
+  getStatusMessage() {
+    // Guard: if no steps yet, just return empty string
+  if (!this.workorder || !this.workorder.steps) {
+    return '';
+  }
+  const currentStage = this.status.current_step_index + 1;
+  const nextStage = currentStage + 1;
+    switch (this.status.process_state) {
+      case 'IDLE': return 'Prescan';
+      case 'PRESCANNING':
+      return 'Prescanning in progress'
+      case 'PROCESS_COMPLETE': return '✅ Process Complete!';
+      case 'WAITING_FOR_ITEMS': return `Enter the item code for Stage ${currentStage}`;
+      case 'MIXING':
+      
+      if (
+        this.workorder &&
+        this.status.current_step_index < this.workorder.steps.length - 1
+      ) {
+        return  `Mixing Stage ${currentStage}, scan Stage ${nextStage} items`;
+      } else {
+        return `Mixing Stage ${currentStage}`;
+      }
+      //case 'WAITING_FOR_LID_CLOSE': return 'Waiting for lid to close';
+      case 'WAITING_FOR_MOTOR_START': return 'Waiting for motor to start';
+      case 'ABORTED': return ' Process Aborted. Click Resume to continue';
+      default: return '';
+    }
+  },
+
+
+   
 
     // Load a batch by manual entry
-    async loadBatchByNumber() {
+    // Load a batch by manual entry
+async loadBatchByNumber() {
+  console.log('loadBatchByNumber called with:', this.enteredBatchNumber);
   const bn = (this.enteredBatchNumber || '').trim();
-  alert (bn)
   if (!bn) return;
   try {
-    const response = await loadWorkorder(bn);
-    
-    // Check if response has error status
+    const response = await loadWorkorder({
+      batchNumber: bn,
+      batchType: this.batchType   
+    });
     if (response && response.status === 'error') {
       this.scanResult = { status: 'error', message: response.message || 'Failed to load batch' };
       return;
     }
-    
-    // Handle success case
     if (response && response.workorder) {
-      this.selectedBatch = { batch_number: bn, name: response.workorder.name || bn };
       this.workorder = response.workorder;
+      this.selectedBatch = { batch_number: bn, name: response.workorder.name || bn };
       this.showBatchSelection = false;
       this.showPrescanning = true;
       this.prescanComplete = false;
@@ -312,40 +431,82 @@ export default {
         if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); 
       });
     } else {
-      this.scanResult = { 
-        status: 'error', 
-        message: response.message || 'Failed to load workorder' 
-      };
+      this.scanResult = { status: 'error', message: response.message || 'Failed to load workorder' };
     }
   } catch (err) {
     console.error('Failed to load batch:', err);
     this.scanResult = { status: 'error', message: 'Failed to load batch' };
   }
 },
-getActualItemStatus(itemId) {
-    // Logic to check if scanned; you may need to track scanned items from status or API
-    // For example, assume status has a 'scanned_items' array
-    return this.status.scanned_items && this.status.scanned_items.includes(itemId) ? 'scanned' : 'pending';
-  },
-    getItemStatus(itemId) {
-      return this.scannedItems.includes(itemId) ? 'scanned' : 'pending';
-    },
 
-    // PRESCAN scanner (calls prescanItem API)
+    getItemStatus(itemId) {
+  // strictly prescan status only
+  if (this.status.prescan_status && this.status.prescan_status.status_by_stage) {
+    for (let stage in this.status.prescan_status.status_by_stage) {
+      const item = this.status.prescan_status.status_by_stage[stage].items.find(i => i.item_id === itemId);
+      if (item) {
+        return item.prescan_status.toLowerCase(); // "scanned" / "pending"
+      }
+    }
+  }
+  return 'pending';
+},
+
+
+
+    getActualItemStatus(itemId, stepIndex) {
+  if (stepIndex < this.status.current_step_index) return 'done';
+  if (stepIndex > this.status.current_step_index) return 'waiting';
+
+  // Inside current step
+  if (this.status.scanned_items && this.status.scanned_items.includes(itemId)) {
+    return 'done';
+  }
+
+  // The next item expected
+  const currentItem = this.workorder.steps[this.status.current_step_index]
+    .items[this.status.current_item_index];
+  if (currentItem && currentItem.item_id === itemId) {
+    return 'in-progress';
+  }
+
+  return 'waiting';
+},
+getItemStatus(itemId) {
+  if (this.status.process_state === 'PRESCANNING') {
+    if (this.status.prescan_status && this.status.prescan_status.status_by_stage) {
+      for (let stage in this.status.prescan_status.status_by_stage) {
+        const item = this.status.prescan_status.status_by_stage[stage].items.find(i => i.item_id === itemId);
+        if (item) {
+          return item.prescan_status.toLowerCase();
+        }
+      }
+    }
+    return 'pending';
+  }
+
+  // After prescan is complete, freeze prescan column as "done"
+  if (this.status.prescan_complete) {
+    return 'done';
+  }
+
+  return 'pending';
+},
+
+   
+
     async handlePrescan() {
       if (!this.barcode.trim()) return;
       try {
-        // call prescan endpoint
         const result = await prescanItem(this.barcode.trim());
-        // result expected { status: 'success'|'fail'|'error', message: '...', prescan_status: {...} }
         if (result && result.status === 'success') {
-          if (!this.scannedItems.includes(this.barcode.trim())) {
-            this.scannedItems.push(this.barcode.trim());
-          }
-          if (this.scannedItemsCount === this.totalItemsCount) {
-            this.prescanComplete = true;
-          }
-        }
+  this.prescanResults[this.barcode.trim()] = 'done';
+  if (!this.scannedItems.includes(this.barcode.trim())) {
+    this.scannedItems.push(this.barcode.trim());
+  }
+  this.markPrescanCompleteIfDone();
+}
+
         this.scanResult = result;
         this.barcode = '';
         this.$nextTick(() => { if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); });
@@ -355,31 +516,73 @@ getActualItemStatus(itemId) {
       }
     },
 
-  async confirmPrescan() {
+    initiateAutoTransition() {
+      this.barcode = '';
+      this.scanResult = { status: 'success', message: 'Pre-scanning complete! Transitioning to mixing process...' };
+      this.autoTransitionTimeout = setTimeout(() => {
+        this.confirmPrescan();
+      }, 2000);
+    },
+
+    markPrescanCompleteIfDone() {
+  if (this.scannedItemsCount === this.totalItemsCount) {
+    // Show popup instead of flipping the whole UI
+    this.showPrescanCompletePopup = true;
+
+   
+
+    this.barcode = "";
+  }
+},
+
+
+    startMixing(seconds) {
+      this.mixing = true;
+      this.mixingTimer = seconds;
+      this.mixingProgress = 0;
+
+      this.mixingInterval = setInterval(() => {
+        this.mixingTimer--;
+        this.mixingProgress = Math.floor(((seconds - this.mixingTimer) / seconds) * 100);
+
+        if (this.mixingTimer <= 0) {
+          clearInterval(this.mixingInterval);
+          this.mixing = false;
+          this.actualScanning = true;
+          this.nextStep();
+        }
+      }, 1000);
+    },
+
+    nextStep() {
+      this.currentStepIndex++;
+      this.barcode = "";
+    },
+
+    async confirmPrescan() {
   try {
-    alert("confirming prescan")
     const response = await confirmPrescanAPI();
     if (response && response.status === 'success') {
-      this.showPrescanning = false;
-      this.pollStatus();
-      this.prescanComplete = true;
-      this.showBatchSelection = false;
-      this.barcode = '';
       
-      // Poll status 3 times to ensure transition
+      this.showPrescanCompletePopup = false;
+
+     
+
+      this.barcode = '';
+
+      
       let attempts = 0;
       while (attempts < 15) {
         await this.updateStatus();
         if (this.status.process_state === 'WAITING_FOR_ITEMS') {
-          this.scanResult = { status: 'success', message: 'Prescanning completed. Scan the items for the stage 1 mixing process' };
+          this.scanResult = {
+            status: 'success',
+            message: 'Prescanning completed. Scan the items for the stage 1 mixing process'
+          };
           break;
         }
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1s
+        await new Promise(resolve => setTimeout(resolve, 1000));
         attempts++;
-      }
-      if (this.status.process_state !== 'WAITING_FOR_ITEMS') {
-        this.scanResult = { status: 'error', message: 'State transition failed; still in PRESCANNING' };
-        this.showPrescanning = true; // Revert UI
       }
     } else {
       const msg = (response && response.message) || 'Failed to confirm pre-scan';
@@ -390,10 +593,21 @@ getActualItemStatus(itemId) {
     this.scanResult = { status: 'error', message: 'Failed to confirm pre-scan' };
   }
 },
+
     formatTime(seconds) {
       const mins = Math.floor(seconds / 60)
       const secs = seconds % 60
       return `${mins}:${secs.toString().padStart(2, '0')}`
+    },
+
+    formatMixTime(seconds) {
+      if (!seconds && seconds !== 0) return '—';
+      const mins = Math.floor(seconds / 60);
+      const secs = seconds % 60;
+      if (mins > 0) {
+        return `${mins}m ${secs}s`;
+      }
+      return `${secs}s`;
     },
 
     async loadWorkorders() {
@@ -405,16 +619,16 @@ getActualItemStatus(itemId) {
         console.error('Failed to load workorders:', error)
       }
     },
+
     updateUIState() {
-      // Handle state-specific UI updates
       switch (this.status.process_state) {
         case 'MIXING':
-          this.$nextTick(() => console.log('Mixing state active')); // Debug
+          this.$nextTick(() => console.log('Mixing state active'));
           break;
         case 'WAITING_FOR_ITEMS':
           this.$nextTick(() => {
             if (this.$refs.actualBarcodeInput) this.$refs.actualBarcodeInput.focus();
-            console.log('Waiting for items, focusing scanner'); // Debug
+            console.log('Waiting for items, focusing scanner');
           });
           break;
         case 'PRESCANNING':
@@ -423,11 +637,9 @@ getActualItemStatus(itemId) {
           this.$nextTick(() => { if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); });
           break;
         default:
-          this.showPrescanning = false;
+          //this.showPrescanning = false;
       }
     },
-  
-
 
     async checkAndTriggerTransitions() {
       try {
@@ -447,39 +659,77 @@ getActualItemStatus(itemId) {
   try {
     const newStatus = await getStatus()
     this.status = newStatus
-    
-    // Handle state-specific UI updates
+
     if (newStatus.process_state === 'WAITING_FOR_ITEMS') {
       this.$nextTick(() => { 
         if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); 
       });
     }
-    
-    // If we've moved from prescanning to waiting for items, update UI
+
     if (this.showPrescanning && newStatus.process_state === 'WAITING_FOR_ITEMS') {
-      this.showPrescanning = false;
+      this.showPrescanning = true;
     }
-    
-    // If process is complete, show completion message
-    if (newStatus.process_state === 'PROCESS_COMPLETE') {
-      this.showingCompletion = true;
-      setTimeout(() => { this.showingCompletion = false; }, 5000);
+
+    if (newStatus.just_completed || newStatus.process_state === 'PROCESS_COMPLETE') {
+      if (!this.showCompletionPopup) {
+        console.log("Process complete detected -> showing popup")
+        this.showCompletionPopup = true
+      }
     }
+
   } catch (error) {
     console.error('Failed to update status:', error)
+
+    // 
     this.status = {
-      process_state: 'IDLE',
-      lid_open: true,
-      motor_running: false,
-      current_step_index: -1,
-      current_item_index: -1,
-      mixing_time_remaining: 0,
-      error_message: '',
-      workorder_id: null,
-      total_steps: 0
+      ...this.status,  // keep old steps, items, etc.
+      error_message: 'Failed to update status'
     }
   }
 },
+
+   getStepStatus(stepIndex) {
+  // During PRESCANNING → keep using backend prescan_status
+  if (this.status.process_state === 'PRESCANNING') {
+    if (this.status.prescan_status && this.status.prescan_status.status_by_stage) {
+      const stage = this.status.prescan_status.status_by_stage[stepIndex + 1];
+      if (stage && stage.live_status) {
+        return stage.live_status.toLowerCase();
+      }
+    }
+    return 'waiting';
+  }
+
+  // After prescan → drive from actual scanning/mixing state
+  if (this.status.process_state === 'WAITING_FOR_ITEMS') {
+    if (stepIndex < this.status.current_step_index) {
+      return 'done'; // already completed step
+    }
+    if (stepIndex === this.status.current_step_index) {
+      return 'in-progress'; // current step waiting for items
+    }
+    return 'waiting'; // future steps
+  }
+
+  if (this.status.process_state === 'MIXING') {
+    if (stepIndex === this.status.current_step_index) {
+      return 'mixing';
+    }
+    if (stepIndex < this.status.current_step_index) {
+      return 'done';
+    }
+    return 'waiting';
+  }
+
+  if (this.status.process_state === 'PROCESS_COMPLETE') {
+    return 'done';
+  }
+
+  return 'waiting';
+},
+
+
+
 
     startPolling() {
       this.statusInterval = setInterval(this.updateStatus, 1000)
@@ -493,21 +743,40 @@ getActualItemStatus(itemId) {
 
     async handleScan() {
   if (!this.barcode.trim()) return;
+   // ⬇️ Add this log here, before calling the API
+  console.log("Sending scan:", this.barcode.trim());
 
   try {
+    // 
     const result = await scanItem(this.barcode.trim());
-    
+
     if (result.error) {
       this.scanResult = { status: 'error', message: 'Scan failed: ' + result.error };
     } else {
+      const stepIndex = this.status.current_step_index;
+      const isMixing = this.status.process_state === 'MIXING';
+
+      // 
+      let allowedStepIndexes = isMixing ? [stepIndex + 1] : [stepIndex];
+
+      const allowedItems = allowedStepIndexes.flatMap(
+        idx => this.workorder.steps[idx]?.items.map(i => i.item_id) || []
+      );
+
+      // Check if scanned item belongs to allowed items
+      if (!allowedItems.includes(this.barcode.trim())) {
+        this.scanResult = { status: 'error', message: 'Invalid item for this stage' };
+        this.barcode = '';
+        return;
+      }
+
+      // Success
       this.scanResult = result;
       if (result.status === 'success') {
         this.barcode = '';
         this.$nextTick(() => {
           if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus();
         });
-        
-        // Update status after successful scan
         await this.updateStatus();
       }
     }
@@ -520,6 +789,7 @@ getActualItemStatus(itemId) {
   }
 },
 
+
     async abortProcess() {
       try {
         await abortProcess()
@@ -527,6 +797,7 @@ getActualItemStatus(itemId) {
         console.error('Failed to abort process:', error)
       }
     },
+
     async resumeProcess() {
       try {
         await resumeProcess()
@@ -534,36 +805,105 @@ getActualItemStatus(itemId) {
         console.error('Failed to resume process:', error)
       }
     },
-    pollStatus() {
-  this.interval = setInterval(() => {
-    getStatus().then(data => {
-      console.log('Polled status:', data); // Add this for debugging
-      this.status = data;
-      this.updateUIState();
-    }).catch(error => console.error('Polling error:', error));
-  }, 1000);
+    confirmProcessComplete() {
+  this.showProcessCompletePopup = false;
+  this.status.process_state = 'IDLE';
+  this.showBatchSelection = true;
+  this.showPrescanning = false;
+  this.workorder = null;
+  this.enteredBatchNumber = '';
 },
 
-    async resetController() {
-      try {
-        await resetController()
-        this.currentWorkorder = null
-        this.scannedItems = []
-        this.barcode = ''
-        this.scanResult = null
-        this.showBatchSelection = true
-        this.showPrescanning = false
-        this.$nextTick(() => { if (this.$refs.batchInput) this.$refs.batchInput.focus(); })
-      } catch (error) {
-        console.error('Failed to reset controller:', error)
-      }
+
+    pollStatus() {
+      this.interval = setInterval(() => {
+        getStatus().then(data => {
+          console.log('Polled status:', data);
+          this.status = data;
+          this.updateUIState();
+        }).catch(error => console.error('Polling error:', error));
+      }, 1000);
+    },
+
+   async handleCompletionOk() {
+  try {
+    const response = await confirmCompletion()
+    if (response.status === 'success') {
+      this.showCompletionPopup = false
+      this.status = { process_state: 'IDLE' }
+      this.batchType = null
+      this.showBatchSelection = true
+      this.showPrescanning = false
+      this.workorder = null
+      this.enteredBatchNumber = ''
+    } else {
+      console.error("Completion confirm failed:", response.message)
     }
+  } catch (err) {
+    console.error('Failed to reset process after completion:', err)
+  }
+}
+
+
   }
 }
 </script>
 
 <style scoped>
 /* (kept your CSS) */
+/* Add styles for the automatic transition message */
+.batch-option {
+  border: 2px solid #007bff;
+  border-radius: 8px;
+  padding: 2rem;
+  cursor: pointer;
+  font-size: 1.2rem;
+  font-weight: bold;
+  text-align: center;
+  width: 180px;
+  transition: 0.2s;
+}
+.batch-option:hover {
+  background-color: #007bff;
+  color: white;
+  transform: translateY(-3px);
+}
+
+.auto-transition-message {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #d4edda;
+  color: #155724;
+  border-radius: 4px;
+  text-align: center;
+}
+.prescan-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+  text-align: center;
+}
+
+.prescan-table th,
+.prescan-table td {
+  border: 1px solid #ccc;
+  padding: 8px;
+  font-size: 0.95rem;
+}
+
+.prescan-table th {
+  background-color: #f8f9fa;
+  font-weight: bold;
+}
+
+.prescan-table td {
+  background-color: #fff;
+}
+
+.prescan-table tr:nth-child(even) td {
+  background-color: #fdfdfd;
+}
+
 .batch-panel { background-color: white; border-radius: 8px; padding: 1.5rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 1rem; }
 .batch-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 1rem; }
 .batch-item { border: 1px solid #ddd; border-radius: 4px; padding: 1rem; cursor: pointer; transition: background-color 0.2s; }
@@ -613,5 +953,58 @@ getActualItemStatus(itemId) {
 .idle-message, .waiting-message { margin-top:1rem; color:#6c757d; font-style:italic; text-align:center; }
 .debug-info { background-color:#f8f9fa; border:1px solid #dee2e6; border-radius:4px; padding:1rem; margin-top:1rem; }
 .debug-info h3 { margin-top:0; color:#6c757d; }
+.confirmation-dialog {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  z-index:1000;
+}
+.completion-popup {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5); /* dark overlay */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.completion-popup .popup-content {
+  background: white;
+  padding: 2rem;
+  border-radius: 8px;
+  text-align: center;
+  max-width: 400px;
+  width: 100%;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+}
+
+
+.status-line {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  text-align: center;
+  background-color: #d4edda;   /* light green */
+  color: #155724;              /* dark green text */
+  border: 1px solid #c3e6cb;   /* green border */
+  border-radius: 6px;
+  font-size: 1rem;
+  font-weight: 500;
+}
+::v-deep(.blinking-highlight) {
+  background-color: yellow;
+  animation: blinking 1s infinite;
+}
+
+@keyframes blinking {
+  0% { background-color: yellow; }
+  50% { background-color: transparent; }
+  100% { background-color: yellow; }
+}
+
+
 .btn-debug { background-color:#6c757d; color:white; padding:0.25rem 0.5rem; border:none; border-radius:4px; font-size:0.8rem; margin-top:1rem; }
 </style>

@@ -1,0 +1,131 @@
+[
+  {
+    "batch_number": "MB001",
+    "workorder": {
+      "workorder_id": "WO221",
+      "name": "Rubber Compound Batch #1",
+      "steps": [
+        {
+          "step_id": 1,
+          "mix_time_sec": 20,
+          "items": [
+            {
+              "item_id": "C1",
+              "name": "Carbon Black",
+              "required_weight": 5.0
+            },
+            {
+              "item_id": "C2",
+              "name": "Sulphur",
+              "required_weight": 1.2
+            },
+            {
+              "item_id": "C3",
+              "name": "Oil",
+              "required_weight": 3.5
+            },
+            {
+              "item_id": "C4",
+              "name": "Polymer Base",
+              "required_weight": 20.0
+            }
+          ]
+        },
+        {
+          "step_id": 2,
+          "mix_time_sec": 15,
+          "items": [
+            {
+              "item_id": "C5",
+              "name": "Antioxidant",
+              "required_weight": 0.5
+            },
+            {
+              "item_id": "C6",
+              "name": "Accelerator",
+              "required_weight": 0.8
+            },
+            {
+              "item_id": "C7",
+              "name": "Filler A",
+              "required_weight": 4.5
+            },
+            {
+              "item_id": "C8",
+              "name": "Filler B",
+              "required_weight": 2.0
+            }
+          ]
+        },
+        {
+          "step_id": 3,
+          "mix_time_sec": 30,
+          "items": [
+            {
+              "item_id": "C9",
+              "name": "Color Pigment",
+              "required_weight": 0.3
+            },
+            {
+              "item_id": "C10",
+              "name": "Softener",
+              "required_weight": 1.0
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "batch_number": "MB002",
+    "workorder": {
+      "workorder_id": "WO222",
+      "name": "Rubber Compound Batch #3",
+      "steps": [
+        {
+          "step_id": 1,
+          "mix_time_sec": 20,
+          "items": [
+            {
+              "item_id": "C21",
+              "name": "Carbon Black",
+              "required_weight": 5.0
+            },
+            {
+              "item_id": "C22",
+              "name": "Sulphur",
+              "required_weight": 1.2
+            },
+            {
+              "item_id": "C23",
+              "name": "Oil",
+              "required_weight": 3.5
+            },
+            {
+              "item_id": "C24",
+              "name": "Polymer Base",
+              "required_weight": 20.0
+            }
+          ]
+        },
+        {
+          "step_id": 2,
+          "mix_time_sec": 25,
+          "items": [
+            {
+              "item_id": "C25",
+              "name": "Color Pigment",
+              "required_weight": 0.3
+            },
+            {
+              "item_id": "C26",
+              "name": "Softener",
+              "required_weight": 1.0
+            }
+          ]
+        }
+      ]
+    }
+  }
+  
+]
