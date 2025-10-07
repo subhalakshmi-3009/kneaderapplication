@@ -2,7 +2,7 @@
   <div class="dashboard">
 
     <!-- FIRST SCREEN: select batch type -->
-    <div class="batch-panel" v-if="!batchType">
+    <div class="batch-panel" v-if="!batchType && status.process_state === 'IDLE'">
       <h2>Select Batch Type</h2>
       <div style="display:flex; gap:20px; justify-content:center; margin-top:1rem;">
         <div class="batch-option" @click="selectBatchType('master')">
@@ -15,30 +15,75 @@
     </div>
 
     <!-- SECOND SCREEN: enter batch number -->
-    <div class="batch-panel" v-else-if="showBatchSelection">
-      <h2>Enter Batch Number for {{ batchType.toUpperCase() }}</h2>
-      <div class="batch-input" style="display:flex; gap:8px; align-items:center;">
-        <input
-          type="text"
-          v-model="enteredBatchNumber"
-          placeholder="Type batch number and press Enter or Load"
-          @keyup.enter="loadBatchByNumber"
-          ref="batchInput"
-          style="flex:1; padding:0.6rem; font-size:1rem;"
-        />
-        <button @click="loadBatchByNumber" class="btn">Load</button>
-      </div>
+<div class="batch-panel" v-else-if="showBatchSelection">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+    <h2 style="margin: 0;">Enter Batch Number for {{ batchType }}</h2>
+    <button 
+       @click="showCancelConfirmation = true"  
+      class="btn btn-warning" 
+      style="padding: 0.5rem 1rem;"
+    >
+      Cancel
+    </button>
+  </div>
+  
+  <div class="batch-input" style="display:flex; gap:8px; align-items:center;">
+    <input
+      type="text"
+      v-model="enteredBatchNumber"
+      placeholder="Type batch number and press Enter or Load"
+      @keyup.enter="loadBatchByNumber"
+      ref="batchInput"
+      style="flex:1; padding:0.6rem; font-size:1rem;"
+    />
+    <button @click="loadBatchByNumber" class="btn">Load</button>
+  </div>
+</div>
+<!-- Cancel Confirmation Dialog for Batch Selection -->
+<div class="confirmation-dialog" v-if="showCancelConfirmation">
+  <div class="dialog-content">
+    <h3>Confirm Cancel</h3>
+    <p>Are you sure you want to cancel batch selection?</p>
+    <div style="display:flex; gap:10px; justify-content:center; margin-top:1rem;">
+      <button @click="confirmCancelBatchSelection" class="btn btn-warning">Yes, Cancel</button>
+      <button @click="cancelCancelBatchSelection" class="btn btn-primary">No, Continue</button>
     </div>
+  </div>
+</div>
+    
 
     <!-- PRESCANNING PANEL -->
     <div class="prescan-panel" v-if="workorder && workorder.steps">
-      <h2>{{ selectedBatch ? selectedBatch.name : workorder.name }}</h2>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+  <h2 style="margin: 0;">{{ selectedBatch ? selectedBatch.name : workorder.name }}</h2>
+  <button 
+    v-if="showCancelButton" 
+    @click="showCancelProcessConfirmation = true" 
+    class="btn btn-warning" 
+    :disabled="isCancelDisabled"
+    style="padding: 0.5rem 1rem;"
+  >
+    Cancel
+  </button>
+</div>
+
+<!-- Cancel Confirmation Dialog for Process -->
+<div class="confirmation-dialog" v-if="showCancelProcessConfirmation">
+  <div class="dialog-content">
+    <h3>Confirm Cancel</h3>
+    <p>Are you sure you want to cancel the process?</p>
+    <div style="display:flex; gap:10px; justify-content:center; margin-top:1rem;">
+      <button @click="confirmCancelProcess" class="btn btn-warning">Yes, Cancel</button>
+      <button @click="cancelCancelProcess" class="btn btn-primary">No, Continue</button>
+    </div>
+  </div>
+</div>
 
       <!-- Status line -->
       <div class="status-line">
         {{ getStatusMessage() }}
       </div>
-
+       
       <!-- Excel-style prescan table -->
       <table class="prescan-table">
         <thead>
@@ -51,120 +96,108 @@
           </tr>
         </thead>
         <tbody>
-          <template v-for="(step, stepIndex) in status.steps" :key="step.step_id || stepIndex">
-            <!-- First row of step -->
-            <tr>
-              <td :rowspan="step.items.length">{{ stepIndex + 1 }}</td>
-              <td>{{ step.items[0].item_id }}</td>
+  <template v-for="(step, stepIndex) in status.steps" :key="step.step_id || stepIndex">
+    <tr :class="{ 'blinking-highlight': isNextStep(stepIndex) }">
+      <td :rowspan="step.items.length">{{ stepIndex + 1 }}</td>
+      <td>{{ step.items[0].item_id }}</td>
 
-              <!-- Mixing Time -->
-              <td :rowspan="step.items.length">
-                <!-- Freeze at 0 once this step is finished OR when process is complete -->
-                <span v-if="status.process_state === 'PROCESS_COMPLETE' ||
-                            status.current_step_index > stepIndex ||
-                            (status.current_step_index === stepIndex && status.mixing_time_remaining === 0)">
-                  0s
-                </span>
+      <td :rowspan="step.items.length">
+        <span v-if="status.current_step_index === stepIndex &&
+                      (status.process_state === 'MIXING' || status.process_state === 'ABORTED')">
+          {{ status.mixing_time_remaining }}s
+        </span>
+        <span v-else>
+          {{ formatMixTime(step.mix_time_sec) }}
+        </span>
+      </td>
 
-                <!-- Current step: show live countdown or paused time -->
-                <span v-else-if="status.current_step_index === stepIndex &&
-                                (status.process_state === 'MIXING' || status.process_state === 'ABORTED')">
-                  {{ status.mixing_time_remaining }}s
-                </span>
+      <td>
+        <span v-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'SCANNED'" style="color: green;">
+          SCANNED
+        </span>
+        <span v-else-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'PENDING'" >
+          PENDING
+        </span>
+        <span v-else-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'DONE'" 
+        :style="{ color: status.process_state === 'PRESCANNING' ? 'green' : 'gray', fontWeight: 'bold' }">
+    DONE
+  </span>
+        <span v-else>
+          {{ getItemStatus(step.items[0].item_id).toUpperCase() }}
+        </span>
+      </td>
 
-                <!-- Future step -->
-                <span v-else>
-                  {{ formatMixTime(step.mix_time_sec) }}
-                </span>
-              </td>
+      <td>
+        <span v-if="stepIndex === status.current_step_index + 1 && step.items[0].live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
+          SCANNED
+        </span>
+        <span v-else-if="step.items[0].live_status === 'READY_TO_LOAD'" style="color: blue; ">
+          READY TO LOAD
+        </span>
+        <span v-else-if="step.items[0].live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
+          SCANNED
+        </span>
+        <span v-else-if="step.items[0].live_status === 'MIXING'" style="color: green; font-weight: bold;">
+          MIXING
+        </span>
+        <span v-else-if="step.items[0].live_status === 'ABORTED'" style="color: red; font-weight: bold;">
+          ABORTED
+        </span>
+        <span v-else-if="step.items[0].live_status === 'DONE'" style="color: gray; font-weight: bold;">
+          DONE
+        </span>
+        <span v-else>
+          {{ (step.items[0].live_status || 'WAITING').toUpperCase() }}
+        </span>
+      </td>
+    </tr>
 
-              <!-- Prescan -->
-              <td>
-                <span v-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'SCANNED'" style="color: green;">
-                  SCANNED
-                </span>
-                <span v-else-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'PENDING'" >
-                  PENDING
-                </span>
-                <span v-else-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'DONE'" style="color: gray; font-weight: bold;">
-                  DONE
-                </span>
-                <span v-else>
-                  {{ getItemStatus(step.items[0].item_id).toUpperCase() }}
-                </span>
-              </td>
+    <tr v-for="item in step.items.slice(1)" :key="item.item_id" :class="{ 'blinking-highlight': isNextStep(stepIndex) }">
+      <td>{{ item.item_id }}</td>
 
-              <!-- Live Status -->
-              <td>
-                <!-- If this is the NEXT step and some items already scanned while mixing -->
-                <span v-if="stepIndex === status.current_step_index + 1 && step.items[0].live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
-                  SCANNED
-                </span>
-                <!-- Normal flow -->
-                <span v-else-if="step.items[0].live_status === 'READY_TO_LOAD'" style="color: blue; ">
-                  READY TO LOAD
-                </span>
-                <span v-else-if="step.items[0].live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
-                  SCANNED
-                </span>
-                <span v-else-if="step.items[0].live_status === 'MIXING'" style="color: green; font-weight: bold;">
-                  MIXING
-                </span>
-                <span v-else-if="step.items[0].live_status === 'DONE'" style="color: gray; font-weight: bold;">
-                  DONE
-                </span>
-                <span v-else>
-                  {{ (step.items[0].live_status || 'WAITING').toUpperCase() }}
-                </span>
-              </td>
-            </tr>
+      <td>
+        <span v-if="getItemStatus(item.item_id).toUpperCase() === 'SCANNED'" style="color: green;">
+          SCANNED
+        </span>
+        <span v-else-if="getItemStatus(item.item_id).toUpperCase() === 'PENDING'" >
+          PENDING
+        </span>
+        <span v-else-if="getItemStatus(item.item_id).toUpperCase() === 'DONE'" 
+        :style="{ color: status.process_state === 'PRESCANNING' ? 'green' : 'gray', fontWeight: 'bold' }">
+    DONE
+  </span>
+        <span v-else>
+          {{ getItemStatus(item.item_id).toUpperCase() }}
+        </span>
+      </td>
 
-            <!-- Remaining items -->
-            <tr v-for="item in step.items.slice(1)" :key="item.item_id">
-              <td>{{ item.item_id }}</td>
-
-              <!-- Prescan -->
-              <td>
-                <span v-if="getItemStatus(item.item_id).toUpperCase() === 'SCANNED'" style="color: green;">
-                  SCANNED
-                </span>
-                <span v-else-if="getItemStatus(item.item_id).toUpperCase() === 'PENDING'" >
-                  PENDING
-                </span>
-                <span v-else-if="getItemStatus(item.item_id).toUpperCase() === 'DONE'" style="color: gray; font-weight: bold;">
-                  DONE
-                </span>
-                <span v-else>
-                  {{ getItemStatus(item.item_id).toUpperCase() }}
-                </span>
-              </td>
-
-              <!-- Live Status -->
-              <td>
-                <!-- Allow future step items to show SCANNED while current is mixing -->
-                <span v-if="stepIndex === status.current_step_index + 1 && item.live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
-                  SCANNED
-                </span>
-                <!-- Normal flow -->
-                <span v-else-if="item.live_status === 'READY_TO_LOAD'" style="color: blue; ">
-                  READY TO LOAD
-                </span>
-                <span v-else-if="item.live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
-                  SCANNED
-                </span>
-                <span v-else-if="item.live_status === 'MIXING'" style="color: green; font-weight: bold;">
-                  MIXING
-                </span>
-                <span v-else-if="item.live_status === 'DONE'" style="color: gray; font-weight: bold;">
-                  DONE
-                </span>
-                <span v-else>
-                  {{ (item.live_status || 'WAITING').toUpperCase() }}
-                </span>
-              </td>
-            </tr>
-          </template>
-        </tbody>
+      <td>
+        <span v-if="stepIndex === status.current_step_index + 1 && item.live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
+          SCANNED
+        </span>
+        <span v-else-if="item.live_status === 'READY_TO_LOAD'" style="color: blue; ">
+          READY TO LOAD
+        </span>
+        <span v-else-if="item.live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
+          SCANNED
+        </span>
+        <span v-else-if="item.live_status === 'MIXING'" style="color: green; font-weight: bold;">
+          MIXING
+        </span>
+        <span v-else-if="item.live_status === 'ABORTED'" style="color: red; font-weight: bold;">
+              ABORTED
+            </span>
+        
+        <span v-else-if="item.live_status === 'DONE'" style="color: gray; font-weight: bold;">
+          DONE
+        </span>
+        <span v-else>
+          {{ (item.live_status || 'WAITING').toUpperCase() }}
+        </span>
+      </td>
+    </tr>
+  </template>
+</tbody>
       </table>
 
       <!-- Scanner Panel -->
@@ -192,29 +225,58 @@
             ref="barcodeInput"
           />
         </div>
+       
 
-        <!-- Abort / Resume Buttons -->
-        <div class="control-buttons" style="margin-top: 1rem; text-align: center;">
-          <!-- Abort button -->
-          <button
-            v-if="['MIXING', 'WAITING_FOR_ITEMS', 'READY_TO_LOAD'].includes(status.process_state)"
-            @click="abortProcess"
-            class="btn btn-danger"
-          >
-            Abort
-          </button>
 
-          <!-- Resume button -->
-          <button
-            v-if="status.process_state === 'ABORTED'"
-            @click="resumeProcess"
-            class="btn btn-success"
-          >
-            Resume
-          </button>
-        </div>
+
+       <!-- Abort / Resume / Complete Abort Buttons -->
+<div class="control-buttons" style="margin-top: 1rem; text-align: center;">
+  <!-- Simple Abort button that triggers confirmation -->
+  <button
+    v-if="['MIXING'].includes(status.process_state)"
+    @click="abortProcess"
+    class="btn btn-danger"
+  >
+    Abort
+  </button>
+
+  <!-- After aborted: show Resume + Complete Abort -->
+  <div v-if="status.process_state === 'ABORTED'" style="display:flex; gap:10px; justify-content:center;">
+    <button @click="resumeProcess" class="btn btn-success">
+      Resume
+    </button>
+    <button @click="completeAbortProcess" class="btn btn-warning">
+      Stop the process
+    </button>
+  </div>
+</div>
+
       </div>
     </div>
+    <!-- Wrong Stage Item Dialog -->
+<div class="confirmation-dialog" v-if="showWrongStagePopup">
+  <div class="dialog-content">
+    <h3>Wrong Stage Item!</h3>
+    <p>{{ wrongStageMessage }}</p>
+    <button @click="closeWrongStagePopup" class="btn btn-primary">OK</button>
+  </div>
+</div>
+ <!-- Add the new Early Scanning Wrong Item Dialog -->
+    <div class="confirmation-dialog" v-if="showEarlyScanningWrongItemPopup">
+      <div class="dialog-content">
+        <h3>Wrong Item for Next Stage!</h3>
+        <p>{{ earlyScanningWrongItemMessage }}</p>
+        <button @click="closeEarlyScanningWrongItemPopup" class="btn btn-primary">OK</button>
+      </div>
+    </div>
+<div class="confirmation-dialog" v-if="showDuplicateScanPopup">
+  <div class="dialog-content">
+    <h3>Duplicate Scanning!</h3>
+    <p>{{ duplicateScanMessage }}</p>
+    <button @click="closeDuplicateScanPopup" class="btn btn-primary">OK</button>
+  </div>
+</div>
+
 
     <!-- Confirmation Dialog -->
     <div class="confirmation-dialog" v-if="showPrescanCompletePopup">
@@ -224,6 +286,25 @@
         <button @click="confirmPrescan" class="btn btn-primary">OK</button>
       </div>
     </div>
+    <!-- Wrong Item Scanned Dialog -->
+<div class="confirmation-dialog" v-if="showWrongItemPopup">
+  <div class="dialog-content">
+    <h3>Wrong Item Scanned!</h3>
+    <p>{{ wrongItemMessage }}</p>
+    <button @click="closeWrongItemPopup" class="btn btn-primary">OK</button>
+  </div>
+</div>
+<!-- Abort Confirmation Dialog -->
+<div class="confirmation-dialog" v-if="showAbortConfirmationPopup">
+  <div class="dialog-content">
+    <h3>Confirm Abort</h3>
+    <p>Are you sure you want to abort the process?</p>
+    <div style="display:flex; gap:10px; justify-content:center; margin-top:1rem;">
+      <button @click="confirmAbort" class="btn btn-danger">Yes, Abort</button>
+      <button @click="cancelAbort" class="btn btn-primary">No, Continue</button>
+    </div>
+  </div>
+</div>
 
     <!-- Process Complete Dialog -->
     <div class="completion-popup" v-if="showCompletionPopup">
@@ -235,7 +316,6 @@
 
   </div>
 </template>
-
 <script>
 import {
   getStatus,
@@ -250,17 +330,27 @@ import {
   loadWorkorder,
   confirmPrescanAPI,
   confirmCompletion,
-  prescanItem
+  prescanItem,
+  completeAbortProcess,
+   cancelProcess 
 } from '@/api'
 
 export default {
   name: 'Dashboard',
   data() {
     return {
+      showCancelConfirmation: false,
+      showCancelProcessConfirmation: false,
+      showEarlyScanningWrongItemPopup: false,
+      earlyScanningWrongItemMessage: '',
+      showAbortConfirmationPopup: false,
       batchType: null,  // "master" or "compound"
       showPrescanCompletePopup: false,
       showCompletionPopup: false,
-
+      showWrongItemPopup: false,
+      wrongItemMessage: '',
+      showWrongStagePopup: false,
+    wrongStageMessage: '',
       showConfirmPopup: false,
       batches: [],
       enteredBatchNumber: '',
@@ -269,7 +359,8 @@ export default {
       showBatchSelection: true,
       showPrescanning: false,
       prescanResults: {}, 
-      
+      showDuplicateScanPopup: false,
+      duplicateScanMessage: '',
       prescanComplete: false,
       actualScanning: false,
       mixing: false,
@@ -308,8 +399,49 @@ export default {
       }
       return [];
     },
-   
+   // Show cancel button only during first stage waiting/ready states and prescan
+showCancelButton() {
+  const showStates = [
+    'PRESCANNING', 
+    'PRESCAN_COMPLETE', 
+    'IDLE'
+  ];
+  
+  // For WAITING_FOR_ITEMS and READY_TO_LOAD, only show during first stage (stage 1)
+  if (['WAITING_FOR_ITEMS', 'READY_TO_LOAD'].includes(this.status.process_state)) {
+    return this.status.current_step_index === 0; // Only stage 1 (index 0)
+  }
+  
+  return this.showBatchSelection || showStates.includes(this.status.process_state);
+},
 
+// Enable cancel button - only during first stage waiting/ready and prescan states
+isCancelDisabled() {
+  // Always enable during prescan states
+  if (['PRESCANNING', 'PRESCAN_COMPLETE', 'IDLE'].includes(this.status.process_state)) {
+    return false;
+  }
+  
+  // For WAITING_FOR_ITEMS and READY_TO_LOAD, only enable during first stage
+  if (['WAITING_FOR_ITEMS', 'READY_TO_LOAD'].includes(this.status.process_state)) {
+    // For first stage, always enable cancel (regardless of scan status)
+    if (this.status.current_step_index === 0) {
+      return false; // Always enable cancel during stage 1
+    }
+    // For other stages, disable cancel
+    return true;
+  }
+  
+  // Disable during all other processing states
+  const disabledStates = [
+    'MIXING', 
+    'ABORTED',
+    'WAITING_FOR_LID_CLOSE',
+    'WAITING_FOR_MOTOR_START',
+    'PROCESS_COMPLETE'
+  ];
+  return disabledStates.includes(this.status.process_state);
+},
     totalItemsCount() {
       if (!this.workorder || !this.workorder.steps) return 0;
       return this.workorder.steps.reduce((total, step) => total + (step.items ? step.items.length : 0), 0);
@@ -321,17 +453,103 @@ export default {
     canScan() {
       return this.status.process_state === 'WAITING_FOR_ITEMS' || 
              this.status.process_state === 'PRESCANNING';
+    },
+    blinkingStageIndex() {
+    if (this.status.process_state === 'MIXING') {
+      return this.status.current_step_index + 1;
     }
+    return -1;
+  }
   },
   async mounted() {
-    console.log('Mounted, showBatchSelection:', this.showBatchSelection);
-    await this.loadBatches();
-    await this.loadWorkorders();
-    this.startPolling();
-    this.$nextTick(() => {
-      if (this.$refs.batchInput) this.$refs.batchInput.focus();
-    });
-  },
+  console.log('Mounted, checking backend state');
+  
+  // Restore saved batch type and batch number from localStorage
+  const savedType = localStorage.getItem('lastBatchType');
+  const savedBatch = localStorage.getItem('lastBatchNumber');
+  
+  if (savedType) {
+    this.batchType = savedType;
+    console.log("Restored saved batch type:", savedType);
+  }
+  
+  if (savedBatch) {
+    this.enteredBatchNumber = savedBatch;
+    console.log("Restored saved batch number:", savedBatch);
+  }
+  
+  try {
+    const statusResp = await getStatus();
+    console.log("Backend status on reload:", statusResp);
+
+    // Sync frontend UI to backend state
+    this.status = statusResp;
+    
+    // Only set workorder if backend has steps and we don't already have one
+    if (statusResp.steps?.length && !this.workorder) {
+      this.workorder = { 
+        name: statusResp.workorder_name, 
+        steps: statusResp.steps 
+      };
+    }
+
+    // Restore batch type from backend if available, otherwise keep from localStorage
+    this.batchType = statusResp.workorder_type || this.batchType;
+
+    // 🔥 CRITICAL: Determine which screen to show based on state
+    if (statusResp.process_state === 'IDLE') {
+      // If we have a batch type but no active workorder, show batch number entry screen
+      if (this.batchType && !this.workorder) {
+        this.showBatchSelection = true;
+        this.showPrescanning = false;
+        console.log("Showing batch number entry screen (reload with batch type)");
+      } 
+      // If we have a workorder, show the prescanning screen
+      else if (this.workorder) {
+        this.showBatchSelection = false;
+        this.showPrescanning = true;
+        console.log("Showing prescanning screen (reload with workorder)");
+      }
+      // Otherwise show batch type selection
+      else {
+        this.showBatchSelection = false;
+        this.showPrescanning = false;
+        console.log("Showing batch type selection screen (fresh start)");
+      }
+    } else {
+      // If backend is in any other state, show the appropriate screen
+      this.showBatchSelection = false;
+      this.showPrescanning = true;
+      console.log("Backend has active process, showing prescanning screen");
+    }
+
+  } catch (err) {
+    console.error("Error checking controller state:", err);
+    // On error, fall back to showing batch selection if we have a batch type
+    if (this.batchType) {
+      this.showBatchSelection = true;
+      this.showPrescanning = false;
+    }
+  }
+
+  console.log('Mounted state - showBatchSelection:', this.showBatchSelection, 
+              'batchType:', this.batchType, 
+              'enteredBatchNumber:', this.enteredBatchNumber,
+              'workorder:', this.workorder);
+
+  // Load batches/workorders for selection
+  await this.loadBatches();
+  await this.loadWorkorders();
+  this.startPolling();
+
+  this.$nextTick(() => {
+    if (this.showBatchSelection && this.$refs.batchInput) {
+      this.$refs.batchInput.focus();
+    } else if (this.showPrescanning && this.$refs.barcodeInput) {
+      this.$refs.barcodeInput.focus();
+    }
+  });
+},
   beforeUnmount() {
     if (this.autoTransitionTimeout) {
       clearTimeout(this.autoTransitionTimeout);
@@ -350,6 +568,11 @@ export default {
         this.barcode = '';
       }
     },
+    enteredBatchNumber(newVal) {
+    if (newVal.trim() !== '') {
+      localStorage.setItem('lastBatchNumber', newVal.trim());
+    }
+  },
     prescanComplete(newVal) {
       if (newVal) {
         this.initiateAutoTransition();
@@ -357,9 +580,73 @@ export default {
     }
   },
   methods: {
+    // Show confirmation popup instead of direct cancellation
+  showCancelConfirmationPopup() {
+    this.showCancelConfirmation = true;
+  },// User confirms cancellation
+  confirmCancelBatchSelection() {
+  console.log("User confirmed batch selection cancellation");
+  
+  // Reset frontend state
+  this.batchType = null;
+  this.enteredBatchNumber = '';
+  this.selectedBatch = null;
+  this.workorder = null;
+  this.scannedItems = [];
+  
+  // Remove localStorage
+  localStorage.removeItem('lastBatchType');
+  localStorage.removeItem('lastBatchNumber');
+  
+  // Update screen state
+  this.showBatchSelection = false;
+  this.showPrescanning = false;
+  this.showCancelConfirmation = false;
+  
+  console.log("Batch selection cancelled - back to batch type selection");
+},
+
+  // User chooses to continue (No button)
+  cancelCancelBatchSelection() {
+    console.log("User cancelled the cancellation");
+    this.showCancelConfirmation = false;
+    // Focus back on the input field
+    this.$nextTick(() => {
+      if (this.$refs.batchInput) this.$refs.batchInput.focus();
+    });
+  },
+confirmCancelProcess() {
+    this.showCancelProcessConfirmation = false;
+    this.cancelProcess(); // Call your existing cancelProcess method
+  },
+
+  cancelCancelProcess() {
+    this.showCancelProcessConfirmation = false;
+    this.$nextTick(() => {
+      if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus();
+    });
+  },
+    isNextStep(stepIndex) {
+      if (this.status.process_state !== 'MIXING') return false;
+      if (stepIndex !== this.status.current_step_index + 1) return false;
+      if (stepIndex >= this.status.steps.length) return false;
+      return !this.isStepFullyScanned(stepIndex);
+    },
+    isStepFullyScanned(stepIndex) {
+      const step = this.status.steps[stepIndex];
+      if (!step || !step.items) return false;
+      return step.items.every(item => item.live_status === 'SCANNED');
+    },
     selectBatchType(type) {
-  this.batchType = type;       // "master" or "compound"
+  this.batchType = type;  
+  localStorage.setItem('lastBatchType', type);     
   this.showBatchSelection = true;
+  this.showPrescanning = false;
+  
+  // Focus on batch input when transitioning to batch number entry
+  this.$nextTick(() => {
+    if (this.$refs.batchInput) this.$refs.batchInput.focus();
+  });
 },
 
     async loadBatches() {
@@ -371,42 +658,59 @@ export default {
         console.error('Failed to load batches:', error);
       }
     },
-    
+    closeWrongItemPopup() {
+    this.showWrongItemPopup = false;
+    this.wrongItemMessage = '';
+    this.barcode = '';
+    this.$nextTick(() => { 
+      if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); 
+    });
+  },
   getStatusMessage() {
-    // Guard: if no steps yet, just return empty string
+  // Guard: if no steps yet, just return empty string
   if (!this.workorder || !this.workorder.steps) {
     return '';
   }
   const currentStage = this.status.current_step_index + 1;
   const nextStage = currentStage + 1;
-    switch (this.status.process_state) {
-      case 'IDLE': return 'Prescan';
-      case 'PRESCANNING':
-      return 'Prescanning in progress'
-      case 'PROCESS_COMPLETE': return '✅ Process Complete!';
-      case 'WAITING_FOR_ITEMS': return `Enter the item code for Stage ${currentStage}`;
-      case 'MIXING':
+  
+  switch (this.status.process_state) {
+    case 'READY_TO_LOAD':
+      return `Add Stage ${currentStage} items to the kneader`;
+    
+    case 'IDLE': return 'Prescan';
+    case 'PRESCANNING': return 'Prescanning in progress';
+    case 'PROCESS_COMPLETE': return '✅ Process Complete!';
+    
+    case 'WAITING_FOR_ITEMS': 
+      // Check if current stage has items ready to load
+      if (this.isStepReadyToLoad(this.status.current_step_index)) {
+        return `Load stage - ${currentStage} items`;
+      }
+      return `Enter the item code for Stage ${currentStage}`;
       
-      if (
-        this.workorder &&
-        this.status.current_step_index < this.workorder.steps.length - 1
-      ) {
-        return  `Mixing Stage ${currentStage}, scan Stage ${nextStage} items`;
+    case 'MIXING':
+      // Check if next stage has items ready to load during mixing
+      if (this.isStepReadyToLoad(this.status.current_step_index + 1)) {
+        return `Load stage - ${nextStage} items`;
+      }
+      
+      if (this.workorder && this.status.current_step_index < this.workorder.steps.length - 1) {
+        return `Mixing Stage ${currentStage}, scan Stage ${nextStage} items`;
       } else {
         return `Mixing Stage ${currentStage}`;
       }
-      //case 'WAITING_FOR_LID_CLOSE': return 'Waiting for lid to close';
-      case 'WAITING_FOR_MOTOR_START': return 'Waiting for motor to start';
-      case 'ABORTED': return ' Process Aborted. Click Resume to continue';
-      default: return '';
-    }
-  },
-
-
-   
-
-    // Load a batch by manual entry
-    // Load a batch by manual entry
+      
+    case 'WAITING_FOR_MOTOR_START': return 'Waiting for motor to start';
+    case 'ABORTED': return ' Process Aborted. Click Resume to continue';
+    default: return '';
+  }
+},
+getRemainingReadyTime() {
+  
+  
+  return '10'; 
+},
 async loadBatchByNumber() {
   console.log('loadBatchByNumber called with:', this.enteredBatchNumber);
   const bn = (this.enteredBatchNumber || '').trim();
@@ -421,12 +725,22 @@ async loadBatchByNumber() {
       return;
     }
     if (response && response.workorder) {
+      // Clear frontend state
+      this.scannedItems = [];
+      this.prescanResults = {};
+      
+      // Set new workorder
       this.workorder = response.workorder;
       this.selectedBatch = { batch_number: bn, name: response.workorder.name || bn };
+      
+      // Update screen state
       this.showBatchSelection = false;
       this.showPrescanning = true;
       this.prescanComplete = false;
-      this.scannedItems = [];
+      
+      // 🔥 Save batch number to localStorage (already done by watcher, but ensure it's saved)
+      localStorage.setItem('lastBatchNumber', bn);
+      
       this.$nextTick(() => { 
         if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); 
       });
@@ -438,7 +752,63 @@ async loadBatchByNumber() {
     this.scanResult = { status: 'error', message: 'Failed to load batch' };
   }
 },
+async completeAbortProcess() {
+  console.log('Complete Abort button clicked');
+  try {
+    const response = await completeAbortProcess();
+    console.log('Complete Abort API response:', response);
+    
+    if (response && response.status === 'success') {
+      console.log('Complete Abort successful, resetting frontend state');
+      // Reset frontend state
+      this.status = { 
+        process_state: 'IDLE',
+        lid_open: true,
+        motor_running: false,
+        current_step_index: -1,
+        current_item_index: -1,
+        mixing_time_remaining: 0,
+        error_message: '',
+        workorder_id: null,
+        total_steps: 0
+      };
+      this.batchType = null;
+      localStorage.removeItem('lastBatchType');
+      localStorage.removeItem('lastBatchNumber');
 
+      this.showBatchSelection = true;
+      this.showPrescanning = false;
+      this.workorder = null;
+      this.enteredBatchNumber = '';
+      this.scannedItems = [];
+      
+      this.scanResult = { 
+        status: 'success', 
+        message: 'Process completely aborted and reset to IDLE' 
+      };
+    } else {
+      console.log('Complete Abort failed:', response);
+      this.scanResult = { 
+        status: 'error', 
+        message: response?.message || 'Failed to completely abort' 
+      };
+    }
+  } catch (error) {
+    console.error('Complete Abort API call failed:', error);
+    this.scanResult = { 
+      status: 'error', 
+      message: 'Failed to completely abort process' 
+    };
+  }
+},
+closeEarlyScanningWrongItemPopup() {
+      this.showEarlyScanningWrongItemPopup = false;
+      this.earlyScanningWrongItemMessage = '';
+      this.barcode = '';
+      this.$nextTick(() => { 
+        if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); 
+      });
+    },
     getItemStatus(itemId) {
   // strictly prescan status only
   if (this.status.prescan_status && this.status.prescan_status.status_by_stage) {
@@ -478,6 +848,10 @@ getItemStatus(itemId) {
       for (let stage in this.status.prescan_status.status_by_stage) {
         const item = this.status.prescan_status.status_by_stage[stage].items.find(i => i.item_id === itemId);
         if (item) {
+          // map "scanned" → "done"
+          if (item.prescan_status.toLowerCase() === 'scanned') {
+            return 'done';
+          }
           return item.prescan_status.toLowerCase();
         }
       }
@@ -485,8 +859,8 @@ getItemStatus(itemId) {
     return 'pending';
   }
 
-  // After prescan is complete, freeze prescan column as "done"
-  if (this.status.prescan_complete) {
+  // After prescan confirmed, everything should stay as "done"
+  if (this.status.prescan_complete || this.showPrescanCompletePopup === false) {
     return 'done';
   }
 
@@ -496,25 +870,95 @@ getItemStatus(itemId) {
    
 
     async handlePrescan() {
-      if (!this.barcode.trim()) return;
-      try {
-        const result = await prescanItem(this.barcode.trim());
-        if (result && result.status === 'success') {
-  this.prescanResults[this.barcode.trim()] = 'done';
-  if (!this.scannedItems.includes(this.barcode.trim())) {
-    this.scannedItems.push(this.barcode.trim());
-  }
-  this.markPrescanCompleteIfDone();
-}
-
-        this.scanResult = result;
-        this.barcode = '';
-        this.$nextTick(() => { if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); });
-      } catch (error) {
-        console.error('Failed to prescan item:', error);
-        this.scanResult = { status: 'error', message: 'Scan failed: ' + (error.response?.data?.error || error.message) };
+  if (!this.barcode.trim()) return;
+  try {
+    const result = await prescanItem(this.barcode.trim());
+    if (result && result.status === 'success') {
+      this.prescanResults[this.barcode.trim()] = 'done';
+      if (!this.scannedItems.includes(this.barcode.trim())) {
+        this.scannedItems.push(this.barcode.trim());
       }
+      this.markPrescanCompleteIfDone();
+      this.scanResult = result;
+    } else if (result && result.status === 'error') {
+      // Check if it's a duplicate scan error
+      if (result.message && result.message.includes('already scanned')) {
+        // Show duplicate scan popup
+        this.duplicateScanMessage = result.message || 'This item has already been scanned.';
+        this.showDuplicateScanPopup = true;
+        this.scanResult = null;
+      } else {
+        // Show wrong item popup
+        this.wrongItemMessage = result.message || 'This item does not belong to the current workorder.';
+        this.showWrongItemPopup = true;
+        this.scanResult = null;
+      }
+    } else {
+      this.scanResult = result;
+    }
+    
+    this.barcode = '';
+    this.$nextTick(() => { if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); });
+  } catch (error) {
+    console.error('Failed to prescan item:', error);
+    this.scanResult = { 
+      status: 'error', 
+      message: 'Scan failed: ' + (error.response?.data?.error || error.message) 
+    };
+  }
+},
+// Keep cancelBatchSelection method for batch selection screen
+    cancelBatchSelection() {
+      console.log("Cancel batch selection clicked");
+      
+      // Reset frontend state only (no API call needed)
+      this.batchType = null;
+      this.enteredBatchNumber = '';
+      this.selectedBatch = null;
+      this.workorder = null;
+      this.scannedItems = [];
+      
+      // Remove localStorage
+      localStorage.removeItem('lastBatchType');
+      localStorage.removeItem('lastBatchNumber');
+      
+      // Show first screen (batch type selection)
+      this.showBatchSelection = false;
+      
+      console.log("Batch selection cancelled - back to batch type selection");
     },
+async cancelProcess() {
+  try {
+    console.log("Cancel button clicked");
+    const response = await cancelProcess(); // API call
+
+    if (response.status === 'success' && response.data.process_state === 'IDLE') {
+      // Reset full UI to initial state
+      this.status = response.data;
+      this.workorder = null;
+      this.batchType = null;
+      this.enteredBatchNumber = '';
+      this.scannedItems = [];
+      this.scanResult = { status: 'success', message: 'Prescan cancelled successfully. System reset to IDLE.' };
+
+      // Hide prescan panel, show batch selection
+      this.showPrescanning = false;
+      this.showBatchSelection = true;
+
+      // Remove localStorage memory of last batch
+      localStorage.removeItem('lastBatchType');
+      localStorage.removeItem('lastBatchNumber');
+
+      console.log("UI reset after cancel: back to batch selection");
+    } else {
+      this.scanResult = { status: 'error', message: response.message || 'Cancel failed' };
+    }
+  } catch (error) {
+    console.error("Cancel API error:", error);
+    this.scanResult = { status: 'error', message: 'Cancel action failed' };
+  }
+},
+
 
     initiateAutoTransition() {
       this.barcode = '';
@@ -534,7 +978,22 @@ getItemStatus(itemId) {
     this.barcode = "";
   }
 },
-
+closeWrongStagePopup() {
+    this.showWrongStagePopup = false;
+    this.wrongStageMessage = '';
+    this.barcode = '';
+    this.$nextTick(() => { 
+      if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); 
+    });
+  },
+  closeDuplicateScanPopup() {
+  this.showDuplicateScanPopup = false;
+  this.duplicateScanMessage = '';
+  this.barcode = '';
+  this.$nextTick(() => { 
+    if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); 
+  });
+},
 
     startMixing(seconds) {
       this.mixing = true;
@@ -566,7 +1025,8 @@ getItemStatus(itemId) {
       
       this.showPrescanCompletePopup = false;
 
-     
+      // force prescan column to "done"
+      this.status.prescan_complete = true;
 
       this.barcode = '';
 
@@ -659,6 +1119,10 @@ getItemStatus(itemId) {
   try {
     const newStatus = await getStatus()
     this.status = newStatus
+    if (newStatus.process_state === 'PRESCAN_COMPLETE' && !this.showPrescanCompletePopup) {
+  this.showPrescanCompletePopup = true;
+}
+
 
     if (newStatus.process_state === 'WAITING_FOR_ITEMS') {
       this.$nextTick(() => { 
@@ -687,6 +1151,9 @@ getItemStatus(itemId) {
     }
   }
 },
+shouldBlink(stepIndex) {
+    return stepIndex === this.blinkingStageIndex;
+  },
 
    getStepStatus(stepIndex) {
   // During PRESCANNING → keep using backend prescan_status
@@ -727,8 +1194,16 @@ getItemStatus(itemId) {
 
   return 'waiting';
 },
-
-
+// Check if a specific step has items in READY_TO_LOAD state
+isStepReadyToLoad(stepIndex) {
+  if (stepIndex < 0 || stepIndex >= this.status.steps.length || !this.status.steps) return false;
+  
+  const step = this.status.steps[stepIndex];
+  if (!step || !step.items || step.items.length === 0) return false;
+  
+  // Check if all items in the step are READY_TO_LOAD
+  return step.items.every(item => item.live_status === 'READY_TO_LOAD');
+},
 
 
     startPolling() {
@@ -743,20 +1218,39 @@ getItemStatus(itemId) {
 
     async handleScan() {
   if (!this.barcode.trim()) return;
-   // ⬇️ Add this log here, before calling the API
   console.log("Sending scan:", this.barcode.trim());
 
   try {
-    // 
     const result = await scanItem(this.barcode.trim());
 
     if (result.error) {
       this.scanResult = { status: 'error', message: 'Scan failed: ' + result.error };
-    } else {
+    } else if (result.status === 'fail') {
+      // Show wrong stage popup
+      if (
+          result.message && 
+          (result.message.includes('does not belong to this stage') || 
+          result.message.includes('does not belong to this or next step'))
+        ) {
+          // Check if this is early scanning (mixing state)
+          if (this.status.process_state === 'MIXING') {
+            const nextStageNumber = this.status.current_step_index + 2;
+            this.earlyScanningWrongItemMessage = `This item does not belong to Stage ${nextStageNumber}. Please scan the correct item for the next stage.`;
+            this.showEarlyScanningWrongItemPopup = true;
+          } else {
+            this.wrongStageMessage = "Item does not belong to this stage";
+            this.showWrongStagePopup = true;
+          }
+          this.scanResult = null;
+          this.barcode = '';
+        } else {
+          this.scanResult = { status: 'error', message: result.message };
+        }
+      }else {
+      // Success case
       const stepIndex = this.status.current_step_index;
       const isMixing = this.status.process_state === 'MIXING';
 
-      // 
       let allowedStepIndexes = isMixing ? [stepIndex + 1] : [stepIndex];
 
       const allowedItems = allowedStepIndexes.flatMap(
@@ -765,7 +1259,16 @@ getItemStatus(itemId) {
 
       // Check if scanned item belongs to allowed items
       if (!allowedItems.includes(this.barcode.trim())) {
-        this.scanResult = { status: 'error', message: 'Invalid item for this stage' };
+        // Check if this is early scanning (mixing state)
+        if (isMixing) {
+          const nextStageNumber = this.status.current_step_index + 2;
+          this.earlyScanningWrongItemMessage = `Invalid item for Stage ${nextStageNumber}`;
+          this.showEarlyScanningWrongItemPopup = true;
+        } else {
+          this.wrongStageMessage = 'Invalid item for this stage';
+          this.showWrongStagePopup = true;
+        }
+        this.scanResult = null;
         this.barcode = '';
         return;
       }
@@ -788,15 +1291,36 @@ getItemStatus(itemId) {
     };
   }
 },
-
-
     async abortProcess() {
-      try {
-        await abortProcess()
-      } catch (error) {
-        console.error('Failed to abort process:', error)
-      }
-    },
+    this.showAbortConfirmationPopup = true;
+  },
+
+  // Add new methods for confirmation handling
+  async confirmAbort() {
+    try {
+      this.showAbortConfirmationPopup = false;
+      // Call the actual abort API
+      await abortProcess();
+      this.scanResult = { 
+        status: 'success', 
+        message: 'Process aborted successfully' 
+      };
+    } catch (error) {
+      console.error('Failed to abort process:', error);
+      this.scanResult = { 
+        status: 'error', 
+        message: 'Failed to abort process' 
+      };
+    }
+  },
+
+  cancelAbort() {
+    this.showAbortConfirmationPopup = false;
+    this.scanResult = { 
+      status: 'info', 
+      message: 'Abort cancelled - process continues' 
+    };
+  },
 
     async resumeProcess() {
       try {
@@ -805,6 +1329,7 @@ getItemStatus(itemId) {
         console.error('Failed to resume process:', error)
       }
     },
+    
     confirmProcessComplete() {
   this.showProcessCompletePopup = false;
   this.status.process_state = 'IDLE';
@@ -832,6 +1357,8 @@ getItemStatus(itemId) {
       this.showCompletionPopup = false
       this.status = { process_state: 'IDLE' }
       this.batchType = null
+      localStorage.removeItem('lastBatchType');
+      localStorage.removeItem('lastBatchNumber');
       this.showBatchSelection = true
       this.showPrescanning = false
       this.workorder = null
@@ -882,18 +1409,20 @@ getItemStatus(itemId) {
   border-collapse: collapse;
   margin-top: 1rem;
   text-align: center;
+  border: 2px solid #333; /* Add darker outer border */
 }
 
 .prescan-table th,
 .prescan-table td {
-  border: 1px solid #ccc;
-  padding: 8px;
+  border: 2px solid #333;
+  padding: 10px;
   font-size: 0.95rem;
 }
 
 .prescan-table th {
-  background-color: #f8f9fa;
+  background-color: #f0f0f0; 
   font-weight: bold;
+  color: #333; /* Darker text for better contrast */
 }
 
 .prescan-table td {
@@ -901,16 +1430,17 @@ getItemStatus(itemId) {
 }
 
 .prescan-table tr:nth-child(even) td {
-  background-color: #fdfdfd;
+   background-color: #f8f8f8;
 }
 
-.batch-panel { background-color: white; border-radius: 8px; padding: 1.5rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 1rem; }
+.batch-panel { background-color: white; border-radius: 8px; padding: 1.5rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 1rem;border: 2px solid #333; /* Add darker border */ }
 .batch-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 1rem; }
 .batch-item { border: 1px solid #ddd; border-radius: 4px; padding: 1rem; cursor: pointer; transition: background-color 0.2s; }
 .batch-item:hover { background-color: #f5f5f5; transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
 .batch-name { font-weight: bold; margin-bottom: 0.5rem; }
 .batch-number { color: #666; font-size: 0.9rem; }
-.prescan-panel { background-color: white; border-radius: 8px; padding: 1.5rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 1rem; }
+.prescan-panel { background-color: white; border-radius: 8px; padding: 1.5rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 1rem;border: 2px solid #333; /* Add darker border */
+} 
 .progress { height: 20px; background-color: #f5f5f5; border-radius: 4px; margin-bottom: 1rem; position: relative; }
 .progress-bar { height: 100%; background-color: #28a745; border-radius: 4px; transition: width 0.3s; }
 .progress-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #333; font-weight: bold; }
@@ -927,7 +1457,7 @@ getItemStatus(itemId) {
 .confirmation-dialog { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0, 0, 0, 0.5); display:flex; justify-content:center; align-items:center; z-index:1000; }
 .dialog-content { background-color: white; padding: 2rem; border-radius: 8px; text-align:center; max-width: 400px; width: 100%; }
 .dashboard { display:flex; flex-direction:column; gap:1rem; max-width:600px; margin:0 auto; padding:1rem; }
-.status-panel { background-color: white; border-radius:8px; padding:1rem; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
+.status-panel { background-color: white; border-radius:8px; padding:1rem; box-shadow:0 2px 4px rgba(0,0,0,0.1);border: 2px solid #333; /* Add darker border */ }
 .status-info { display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:1rem; margin-bottom:1rem; }
 .status-item { display:flex; flex-direction:column; }
 .label { font-weight:bold; margin-bottom:0.25rem; color:#666; }
@@ -937,10 +1467,11 @@ getItemStatus(itemId) {
 .running { color:#28a745; }
 .stopped { color:#6c757d; }
 .control-buttons { display:flex; gap:0.5rem; }
-.btn { padding:0.5rem 1rem; border:none; border-radius:4px; cursor:pointer; font-size:1rem; }
-.btn-danger { background-color:#dc3545; color:white; }
+.btn { padding:0.6rem 1.2rem; border:2px solid transparent; border-radius:6px; cursor:pointer; font-size:1rem;font-weight: 600;
+  transition: all 0.3s ease; }
+.btn-danger { background-color:#dc3545; color:white;border-color: #c82333; }
 .btn-warning { background-color:#ffc107; color:black; }
-.scanner-panel { background-color:white; border-radius:8px; padding:1.5rem; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
+.scanner-panel { background-color:white; border-radius:8px; padding:1.5rem; box-shadow:0 2px 4px rgba(0,0,0,0.1);border: 1px solid #ccc; /* Add darker border */ }
 .scanner-panel.centered { text-align:center; }
 .scanner-input { margin-bottom:1rem; }
 .scanner-input input { width:100%; padding:0.75rem; border:2px solid #ddd; border-radius:4px; font-size:1.1rem; text-align:center; }
@@ -975,11 +1506,45 @@ getItemStatus(itemId) {
 .completion-popup .popup-content {
   background: white;
   padding: 2rem;
-  border-radius: 8px;
+  border-radius: 10px;
   text-align: center;
   max-width: 400px;
   width: 100%;
   box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+  border: 2px solid #333;
+}
+/* Abort confirmation specific styling */
+.confirmation-dialog .dialog-content {
+  background: white;
+  padding: 2rem;
+  border-radius: 10px;
+  text-align: center;
+  max-width: 400px;
+  width: 100%;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  border: 2px solid #dc3545; /* Red border for abort confirmation */
+}
+
+.confirmation-dialog h3 {
+  color: #dc3545;
+  margin-bottom: 1rem;
+}
+
+.confirmation-dialog p {
+  margin-bottom: 1.5rem;
+  font-size: 1.1rem;
+}
+
+.confirmation-dialog .btn-danger {
+  background-color: #dc3545;
+  border-color: #c82333;
+  padding: 0.6rem 1.5rem;
+}
+
+.confirmation-dialog .btn-primary {
+  background-color: #007bff;
+  border-color: #0069d9;
+  padding: 0.6rem 1.5rem;
 }
 
 
@@ -987,24 +1552,29 @@ getItemStatus(itemId) {
   margin-top: 1rem;
   padding: 0.75rem 1rem;
   text-align: center;
-  background-color: #d4edda;   /* light green */
+  background-color:#e8f5e8;    /* light green */
   color: #155724;              /* dark green text */
-  border: 1px solid #c3e6cb;   /* green border */
+  border: 2px solid #28a745;   /* green border */
   border-radius: 6px;
   font-size: 1rem;
-  font-weight: 500;
+  font-weight: 600;
 }
-::v-deep(.blinking-highlight) {
-  background-color: yellow;
+
+/* Blinking highlight styles - FIXED VERSION */
+.blinking-highlight {
   animation: blinking 1s infinite;
 }
 
 @keyframes blinking {
   0% { background-color: yellow; }
-  50% { background-color: transparent; }
+  50% { background-color: #ffff99; } /* slightly lighter yellow */
   100% { background-color: yellow; }
 }
 
+/* Ensure the blinking effect overrides other background colors */
+.prescan-table tr.blinking-highlight td {
+  animation: blinking 1s infinite !important;
+}
 
 .btn-debug { background-color:#6c757d; color:white; padding:0.25rem 0.5rem; border:none; border-radius:4px; font-size:0.8rem; margin-top:1rem; }
 </style>

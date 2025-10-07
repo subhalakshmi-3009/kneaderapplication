@@ -75,6 +75,11 @@ class KneaderController:
         # --- NEW: track scanned items per step globally to avoid local race/visibility issues
         self.scanned_items_by_step = {}
         self._just_completed = False
+        self._is_paused.set()  # Ensure not paused
+        self._resume_event.set()
+        self._resumed_from_abort = False
+        self.ready_timestamps = {}
+        print("🔄 Controller reset: state=IDLE")
 
     def _handle_gateway_event(self, event: Dict[str, Any]):
         if "tag_name" in event and "value" in event:
@@ -92,11 +97,14 @@ class KneaderController:
             )
         )
 
+    # controller.py
+
     def get_full_status(self) -> Dict[str, Any]:
         status = {
             "process_state": self.process_state,
             "workorder_id": self.workorder.get("workorder_id") if self.workorder else None,
             "workorder_name": self.workorder.get("name") if self.workorder else None,
+            "workorder_type": self.workorder.get("type") if self.workorder else None,
             "steps": self.workorder.get("steps", []) if self.workorder else [],
             "current_step_index": self.current_step_index,
             "current_item_index": self.current_item_index,
@@ -122,38 +130,23 @@ class KneaderController:
                 if 0 <= self.current_step_index < len(self.workorder["steps"]):
                     step_total = int(self.workorder["steps"][self.current_step_index].get("mix_time_sec", 0))
                 else:
-                    step_total = 0
+                    # If step index is out of bounds (e.g., after last step), find last mix time
+                    last_step_index = len(self.workorder["steps"]) - 1
+                    if last_step_index >= 0:
+                        step_total = int(self.workorder["steps"][last_step_index].get("mix_time_sec", 0))
+                    else:
+                        step_total = 0
 
                 status["mixing_time_total"] = step_total
 
                 if self.process_state == "PROCESS_COMPLETE":
                     status["mixing_time_remaining"] = 0
-
-                elif self.process_state == "ABORTED":
-                    rem = int(self.remaining_mix_time) if getattr(self, "remaining_mix_time",
-                                                                  None) is not None else step_total
-                    status["mixing_time_remaining"] = max(0, rem)
-
-                elif self.process_state == "MIXING":
-                    if getattr(self, "mixing_timer_started", False) and getattr(self, "mixing_start_timestamp", None):
-                        elapsed = time.time() - self.mixing_start_timestamp
-                        if getattr(self, "_resumed_from_abort", False) and getattr(self, "remaining_mix_time",
-                                                                                   None) and self.remaining_mix_time < step_total:
-                            baseline = int(self.remaining_mix_time)
-                        else:
-                            baseline = step_total
-                        rem = max(0, int(baseline - elapsed))
-                        status["mixing_time_remaining"] = rem
-                    else:
-                        baseline = getattr(self, "remaining_mix_time", None)
-                        status["mixing_time_remaining"] = int(baseline if baseline is not None else step_total)
-
                 else:
-                    baseline = getattr(self, "remaining_mix_time", None)
-                    if baseline is not None and baseline != 0:
-                        status["mixing_time_remaining"] = int(baseline)
-                    else:
-                        status["mixing_time_remaining"] = step_total
+                    # For all other states (MIXING, ABORTED, WAITING_FOR_ITEMS, etc.)
+                    # simply report the last known remaining time. The mixing loop
+                    # in _execute_mixing_process is the single source of truth.
+                    rem = getattr(self, "remaining_mix_time", step_total)
+                    status["mixing_time_remaining"] = int(rem)
 
             except (IndexError, KeyError, TypeError):
                 status["mixing_time_total"] = 0
@@ -166,54 +159,59 @@ class KneaderController:
                     item_status = "WAITING"
                     scanned_set = self.scanned_items_by_step.get(s_idx, set())
 
-                    # Step already completed
-                    if self.current_step_index > s_idx or self.process_state == "PROCESS_COMPLETE":
+                    # === NEW LOGIC: Handle ABORTED state first ===
+                    if self.process_state == "ABORTED":
+                        # All completed AND current steps show as ABORTED
+                        if s_idx <= self.current_step_index:
+                            item_status = "ABORTED"
+                        else:
+                            # Future steps use normal scanned logic
+                            if item["item_id"] in scanned_set:
+                                item_status = "SCANNED"
+                            else:
+                                item_status = "WAITING"
+
+                    # PROCESS_COMPLETE state - all steps are DONE
+                    elif self.process_state == "PROCESS_COMPLETE":
                         item_status = "DONE"
 
-                    # Current step
-                    elif (
-                            self.process_state in ("MIXING", "WAITING_FOR_LID_CLOSE", "WAITING_FOR_MOTOR_START")
-                            and self.current_step_index == s_idx
-                    ):
-                        item_status = "MIXING"
+                    # Step already completed (in normal operation)
+                    elif self.current_step_index > s_idx:
+                        item_status = "DONE"
 
-                    # Item scanned
-                    elif item["item_id"] in scanned_set:
-                        if s_idx == self.current_step_index:
-                            if self.process_state == "WAITING_FOR_ITEMS":
+                    # Current step logic
+                    elif self.current_step_index == s_idx:
+                        if self.process_state in ("MIXING", "WAITING_FOR_LID_CLOSE", "WAITING_FOR_MOTOR_START"):
+                            item_status = "MIXING"
+                        elif self.process_state == "READY_TO_LOAD":
+                            item_status = "READY_TO_LOAD"
+                        elif self.process_state == "WAITING_FOR_ITEMS":
+                            if item["item_id"] in scanned_set:
                                 all_scanned = all(
                                     i["item_id"] in scanned_set
                                     for i in self.workorder["steps"][s_idx]["items"]
                                 )
                                 item_status = "READY_TO_LOAD" if all_scanned else "SCANNED"
-                            elif self.process_state == "READY_TO_LOAD":
-                                item_status = "READY_TO_LOAD"
-                            elif self.process_state == "MIXING":
-                                item_status = "MIXING"
                             else:
-                                item_status = "SCANNED"
+                                item_status = "WAITING"
 
-                        elif s_idx == self.current_step_index + 1:
-                            # ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Show SCANNED immediately while previous step is mixing
-                            if self.process_state == "MIXING":
-                                item_status = "SCANNED"
-                            else:
-                                item_status = "SCANNED"
-
-                        else:
+                    # Next step items (early scanning during MIXING)
+                    elif s_idx == self.current_step_index + 1 and self.process_state == "MIXING":
+                        if item["item_id"] in scanned_set:
                             item_status = "SCANNED"
-
-                    else:
-                        # Next step but not scanned yet
-                        if s_idx == self.current_step_index + 1 and self.process_state == "MIXING":
+                        else:
                             item_status = "WAITING"
+
+                    # Other future steps
+                    else:
+                        if item["item_id"] in scanned_set:
+                            item_status = "SCANNED"
                         else:
                             item_status = "WAITING"
 
                     item["live_status"] = item_status
 
         return status
-
     def _get_prescan_status(self, prescan_data: Dict[str, Any]) -> Dict[str, Any]:
         status_by_stage = {}
 
@@ -401,7 +399,7 @@ class KneaderController:
         else:
             scan_response = {
                 "status": "fail",
-                "message": f"Scanned item {barcode} does not belong to this or next step."
+                "message": f"Scanned item {barcode} does not belong to this stage."
             }
             await self.logger.log(
                 "WARNING",
@@ -413,6 +411,8 @@ class KneaderController:
         if future:
             future.set_result(scan_response)
 
+    # controller.py
+
     async def _execute_mixing_process(self, step_index: int) -> bool:
         lid_timeout = getattr(config, 'LID_CLOSE_TIMEOUT_SEC', 30.0)
 
@@ -421,20 +421,17 @@ class KneaderController:
             self.process_state = "WAITING_FOR_LID_CLOSE"
             await self.logger.log("INFO", "Closing lid for mixing", data=self.get_full_status(), is_event=True)
 
-            # ... (lid close + motor start code unchanged) ...
+            # ... (lid close + motor start code is unchanged) ...
 
             # Start mixing
             self.process_state = "MIXING"
             self.mixing_timer_started = True
 
+            # Simplified initial setup
             step_total = int(self.workorder["steps"][step_index]["mix_time_sec"])
-            if getattr(self, "remaining_mix_time", None) and 0 < self.remaining_mix_time < step_total:
-                mix_duration = self.remaining_mix_time
-            else:
-                mix_duration = step_total
-                self.remaining_mix_time = step_total
-                self.mixing_start_timestamp = time.time()
-                self._resumed_from_abort = False
+            mix_duration = step_total  # Always start with the full duration
+            self.remaining_mix_time = step_total  # Init remaining time
+            self.mixing_start_timestamp = time.time()
 
             await self.logger.log("INFO", f"Mixing started for {mix_duration} seconds",
                                   data=self.get_full_status(), is_event=True)
@@ -444,23 +441,23 @@ class KneaderController:
             last_progress_log = time.time()
 
             while time.time() < mix_end_time:
-                if self.process_state == "ABORTED":
-                    remaining = int(mix_end_time - time.time())
-                    self.remaining_mix_time = remaining if remaining > 0 else 0
-                    self.mixing_timer_started = False
-                    self.motor_running = False
-                    self._resumed_from_abort = False
-                    await self.logger.log("INFO", "Mixing aborted mid-step. Freezing state.",
-                                          data=self.get_full_status(), is_event=True)
-                    return False
+                await self._is_paused.wait()  # This is where it pauses on abort
 
-                await self._is_paused.wait()
+                if getattr(self, "_resumed_from_abort", False):
+                    # We have just resumed. Recalculate the end time based on the remaining time.
+                    mix_duration = self.remaining_mix_time
+                    self.mixing_start_timestamp = time.time()
+                    mix_end_time = self.mixing_start_timestamp + mix_duration
+                    self._resumed_from_abort = False  # Reset the flag now that we've used it
+                    await self.logger.log("INFO", f"Mixing resumed. Remaining duration: {int(mix_duration)}s",
+                                          data=self.get_full_status(), is_event=True)
 
                 current_time = time.time()
                 if current_time - last_progress_log >= 1:
-                    remaining = int(mix_end_time - current_time)
+                    remaining = mix_end_time - current_time
                     self.remaining_mix_time = remaining if remaining > 0 else 0
-                    await self.logger.log("INFO", f"Mixing in progress... {remaining} seconds remaining",
+                    await self.logger.log("INFO",
+                                          f"Mixing in progress... {int(self.remaining_mix_time)} seconds remaining",
                                           data=self.get_full_status(), is_event=False)
                     last_progress_log = current_time
 
@@ -524,7 +521,6 @@ class KneaderController:
             except:
                 pass
             raise
-
     async def _process_workorder(self, initial_barcode: Optional[str] = None):
         try:
             await self.logger.log("INFO", f"Starting workorder: {self.workorder.get('name')}",
@@ -607,21 +603,18 @@ class KneaderController:
 
             await asyncio.sleep(1)
 
+    # controller.py
+
     async def _handle_abort_command(self):
-        if self.process_state in ("MIXING", "WAITING_FOR_ITEMS"):
+        if self.process_state in ("MIXING", "WAITING_FOR_ITEMS","READY_TO_LOAD"):
             try:
                 # Always stop motor and open lid (safe for both states)
                 await self.gateway.send_command({"action": "write", "tag_name": "wr_motor_control_kn1", "value": 0})
                 await self.gateway.send_command({"action": "write", "tag_name": "wr_lid_status_kn1", "value": 0})
 
                 if self.process_state == "MIXING":
-                    # Calculate remaining mixing time only if mixing was active
-                    if self.mixing_timer_started and self.mixing_start_timestamp:
-                        elapsed_time = time.time() - self.mixing_start_timestamp
-                        total_mix_time = self.workorder["steps"][self.current_step_index]["mix_time_sec"]
-                        self.remaining_mix_time = max(0, total_mix_time - elapsed_time)
-
-                    # Update state for mixing abort
+                    # The 'while' loop in _execute_mixing_process keeps self.remaining_mix_time
+                    # accurately updated. We just need to pause the execution.
                     self._is_paused.clear()
                     self.mixing_timer_started = False
                     self.process_state = "ABORTED"
@@ -704,6 +697,8 @@ class KneaderController:
                 self.mixing_start_timestamp = time.time() - elapsed_before_pause
                 self.mixing_timer_started = True
 
+                self._resumed_from_abort = True
+
                 self._is_paused.set()
                 self._resume_event.set()
 
@@ -719,6 +714,61 @@ class KneaderController:
         else:
             return {"status": "fail", "message": "Cannot resume - not in ABORTED state"}
 
+    async def _handle_complete_abort_command(self):
+        print("🔄 Handling complete_abort command")
+        try:
+            # Always try to stop hardware regardless of state
+            try:
+                await self.gateway.send_command({"action": "write", "tag_name": "wr_motor_control_kn1", "value": 0})
+                await self.gateway.send_command({"action": "write", "tag_name": "wr_lid_status_kn1", "value": 0})
+                print("✅ Hardware stopped: motor=0, lid=0")
+            except Exception as e:
+                print(f"⚠️ Hardware stop warning: {e}")
+
+            # Cancel running workorder task if active
+            if self.work_order_task and not self.work_order_task.done():
+                print("🔄 Cancelling workorder task")
+                self.work_order_task.cancel()
+                try:
+                    await self.work_order_task
+                except asyncio.CancelledError:
+                    print("✅ Workorder task cancelled successfully")
+                except Exception as e:
+                    print(f"⚠️ Workorder task cancellation warning: {e}")
+                self.work_order_task = None
+
+            # Reset everything - COMPLETELY
+            print("🔄 Resetting internal state")
+            self._reset_internal_state()
+            self.workorder = None
+            self.process_state = "IDLE"
+
+            # 🔥 CRITICAL: Reset all mixing-related state variables
+            self.mixing_timer_started = False
+            self.mixing_start_timestamp = None
+            self.remaining_mix_time = 0
+            self._resumed_from_abort = False
+
+            # 🔥 Also clear any paused state
+            self._is_paused.set()  # Ensure not paused
+            self._resume_event.set()
+
+            await self.logger.log(
+                "INFO",
+                "Workorder completely aborted. Controller reset to IDLE.",
+                data=self.get_full_status(),
+                is_event=True
+            )
+
+            print("✅ Complete abort successful, returning status")
+            return self.get_full_status()
+
+        except Exception as e:
+            print(f"❌ Complete abort failed: {e}")
+            self.process_state = "ERROR"
+            self.error_message = f"Complete abort failed: {str(e)}"
+            await self.logger.log("ERROR", self.error_message, data=self.get_full_status(), is_event=True)
+            return {"status": "fail", "message": self.error_message}
     async def _handle_prescan_item(self, message):
         if self.process_state in ("PRESCANNING", "PRESCAN_COMPLETE"):
             future = asyncio.get_running_loop().create_future()
@@ -749,30 +799,44 @@ class KneaderController:
                 await self.logger.log("INFO", f"Item prescanned: {barcode}", data=response, is_event=False)
                 # Check if all items are scanned and automatically transition
                 prescan_status = self._get_prescan_status(self._prescan_data)
-                if prescan_status.get('all_scanned'):
-                    # self.process_state = "PRESCAN_COMPLETE"
+                total = prescan_status.get('total_items', 0)
+                scanned = prescan_status.get('scanned_count', 0)
+
+                # ✅ Trigger only when *all* items are scanned
+                if total > 0 and scanned == total:
                     await self.logger.log("INFO",
                                           "All prescan items scanned ",
                                           data=self.get_full_status(), is_event=True)
+                    # ✅ Mark prescan as complete in backend state
+                    self.process_state = "PRESCAN_COMPLETE"
+
+                    await self.logger.log(
+                        "INFO",
+                        "Prescan stage completed. Waiting for frontend confirmation.",
+                        data=self.get_full_status(),
+                        is_event=True
+                    )
+
 
             else:
+                # DUPLICATE SCAN - item exists but already scanned
                 response = {
-                    "status": "fail",
-                    "message": "Item already prescanned",
+                    "status": "error",  # Fixed typo: was "erroe"
+                    "message": "Item already scanned",  # Correct message for duplicate
                     "prescan_status": self._get_prescan_status(self._prescan_data)
                 }
                 await self.logger.log("WARNING", f"Duplicate scan: {barcode}", data=response, is_event=False)
         else:
+            # WRONG ITEM - item doesn't belong to workorder
             response = {
-                "status": "error",
-                "message": "Item does not belong to this workorder",
+                "status": "error",  # Use "error" for wrong item
+                "message": "Item does not belong to this workorder",  # Correct message for wrong item
                 "prescan_status": self._get_prescan_status(self._prescan_data)
             }
             await self.logger.log("WARNING", f"Invalid item: {barcode}", data=response, is_event=False)
 
         if future:
             future.set_result(response)
-
     async def hmi_client_handler(self, reader, writer):
         peer = writer.get_extra_info("peername")
         try:
@@ -790,10 +854,40 @@ class KneaderController:
                     response = await self._handle_abort_command()
                 elif command == "resume":
                     response = await self._handle_resume_command()
+                elif command == "complete_abort":
+                    response = await self._handle_complete_abort_command()
+                elif command == "cancel":
+                    # Cancel during prescan or prescan_complete → reset cleanly
+                    if self.process_state in ("PRESCANNING", "PRESCAN_COMPLETE","WAITING_FOR_ITEMS","READY_TO_LOAD"):
+                        #Cancel any running workorder task first
+                        if self.work_order_task and not self.work_order_task.done():
+                            self.work_order_task.cancel()
+                            try:
+                                await self.work_order_task
+                            except asyncio.CancelledError:
+                                pass
+                            self.work_order_task = None
+                        self._reset_internal_state()
+                        self.workorder = None
+                        self.process_state = "IDLE"
+                        await self.logger.log("INFO", "Prescan cancelled by user - system reset to IDLE",
+                                              data=self.get_full_status(), is_event=True)
+                        response = self.get_full_status()
+                    else:
+                        response = {"status": "fail", "message": f"Cancel not allowed in state {self.process_state}"}
+
                 elif command in ("reset", "reset_controller"):
                     if self.work_order_task and not self.work_order_task.done():
                         self.work_order_task.cancel()
+                        try:
+                            await self.work_order_task
+                        except asyncio.CancelledError:
+                            pass
+                        self.work_order_task = None
+
                     self._reset_internal_state()
+                    self.workorder = None
+                    self.process_state = "IDLE"  # 🔹 explicitly enforce
                     response = self.get_full_status()
                 elif command == "confirm_start":
                     response = await self._handle_confirm_start_command()

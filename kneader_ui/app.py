@@ -128,6 +128,22 @@ def load_workorders(batch_type="compound"):
 @app.route('/')
 def serve_ui():
     return send_from_directory('static', 'index.html')
+@app.route('/api/cancel', methods=['POST'])
+def cancel_process():
+    try:
+        response = controller.send_command({"command": "cancel"})
+        if response and not response.get("error"):
+            return jsonify({
+                "status": "success",
+                "message": "Prescan cancelled, system reset to IDLE",
+                "data": response
+            })
+        else:
+            error_msg = response.get("error", "Cancel failed") if response else "No response from controller"
+            return jsonify({"status": "fail", "message": error_msg})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route('/api/load_workorder', methods=['POST'])
 def load_workorder():
@@ -182,11 +198,13 @@ def prescan_item():
         barcode = data.get('barcode')
         if not barcode:
             return jsonify({"status": "fail", "message": "No barcode provided"})
-        response = controller.send_command({"command": "prescan_item","data": {"barcode": barcode}})
-        if response and not response.get("error"):
+        response = controller.send_command({"command": "prescan_item", "data": {"barcode": barcode}})
+
+        # Always return the response from controller to let frontend handle different statuses
+        if response:
             return jsonify(response)
         else:
-            return jsonify({"status": "fail", "message": response.get("error", "Failed to prescan") if response else "Failed to prescan"})
+            return jsonify({"status": "error", "message": "No response from controller"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -258,6 +276,29 @@ def resume_process():
             return jsonify({"status": "fail", "message": response.get("error", "Failed to resume")})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/api/complete_abort', methods=['POST'])
+def complete_abort():
+    try:
+        print("Received complete_abort request from frontend")
+        response = controller.send_command({"command": "complete_abort"})
+        print(f"Controller response: {response}")
+
+        if response and not response.get("error"):
+            return jsonify({
+                "status": "success",
+                "message": "Process completely aborted",
+                "data": response
+            })
+        else:
+            error_msg = response.get("error",
+                                     "Failed to completely abort") if response else "No response from controller"
+            print(f"Complete abort error: {error_msg}")
+            return jsonify({"status": "fail", "message": error_msg})
+    except Exception as e:
+        print(f"Complete abort exception: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 @app.route('/api/confirm_completion', methods=['POST'])
 def confirm_completion():
     try:
@@ -269,13 +310,15 @@ def confirm_completion():
 @app.route('/api/reset', methods=['POST'])
 def reset_process():
     try:
+        controller.connected = False
         response = controller.send_command({"command": "reset"})
-        if response and not response.get("error"):
-            return jsonify({"status": "success", "message": "Process reset"})
+        if response and response.get("process_state") == "IDLE":
+            return jsonify({"status": "success", "message": "Controller reset", "data": response})
         else:
-            return jsonify({"status": "fail", "message": response.get("error", "Failed to reset")})
+            return jsonify({"status": "fail", "message": "Reset failed", "data": response})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 
 

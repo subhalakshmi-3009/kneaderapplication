@@ -32,6 +32,31 @@ export const abortProcess = () => {
 export const resumeProcess = () => {
   return api.post('/resume').then(response => response.data)
 }
+export const completeAbortProcess = () => {
+  console.log('Sending complete_abort request to backend');
+  return api.post('/complete_abort')
+    .then(response => {
+      console.log('Complete abort API response received:', response.data);
+      return response.data;
+    })
+    .catch(error => {
+      console.error('Complete abort API error:', error);
+      return { status: 'error', message: 'API call failed' };
+    });
+}
+export const cancelProcess = () => {
+  console.log('Sending cancel request to backend');
+  return api.post('/cancel')
+    .then(response => {
+      console.log('Cancel API response received:', response.data);
+      return response.data;
+    })
+    .catch(error => {
+      console.error('Cancel API error:', error);
+      return { status: 'error', message: 'Cancel API call failed' };
+    });
+};
+
 
 
 
