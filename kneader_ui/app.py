@@ -104,6 +104,8 @@ class ControllerClient:
             print(f"Failed to write to log file: {e}")
         print(message)
 
+
+
 controller = ControllerClient()
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -128,6 +130,7 @@ def load_workorders(batch_type="compound"):
 @app.route('/')
 def serve_ui():
     return send_from_directory('static', 'index.html')
+
 @app.route('/api/cancel', methods=['POST'])
 def cancel_process():
     try:
@@ -299,6 +302,23 @@ def complete_abort():
     except Exception as e:
         print(f"Complete abort exception: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
+@app.route('/api/save_workorder', methods=['POST'])
+def save_workorder():
+
+    try:
+        response = controller.send_command({"command": "save_workorder"})
+        if response and not response.get("error"):
+            return jsonify({
+                "status": "success",
+                "message": response.get("message", "Workorder saved successfully"),
+                "data": response
+            })
+        else:
+            error_msg = response.get("error", "Failed to save workorder") if response else "No response from controller"
+            return jsonify({"status": "fail", "message": error_msg})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route('/api/confirm_completion', methods=['POST'])
 def confirm_completion():
     try:

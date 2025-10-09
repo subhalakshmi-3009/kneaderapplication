@@ -8,6 +8,7 @@ const api = axios.create({
   timeout: 10000
 })
 
+
 // Add response interceptor to handle errors
 api.interceptors.response.use(
   (response) => response,
@@ -16,6 +17,11 @@ api.interceptors.response.use(
     throw error
   }
 )
+export const login = (username, password) => {
+  return axios.post('http://127.0.0.1:5000/api/login', { username, password })
+    .then(response => response.data)
+}
+
 
 export const getStatus = () => {
   return api.get('/status').then(response => response.data)
@@ -72,7 +78,7 @@ export const getWorkorders = () => {
 export const checkTransitions = () => {
   return api.get('/check_transitions').then(response => response.data)
 }
-// Add these to your api.js file
+
 export const getBatches = () => {
   return api.get(`/batches/${batch_number}`).then(response => response.data);
 };
@@ -98,6 +104,19 @@ export const confirmCompletion = () => {
 export const prescanItem = (barcode) => {
   return api.post('/prescan', { 'barcode':barcode }).then(response => response.data);
 };
+export const saveWorkorder = () => {
+  console.log('Sending save_workorder request to backend');
+  return api.post('/save_workorder')
+    .then(response => {
+      console.log('Save workorder API response:', response.data);
+      return response.data;
+    })
+    .catch(error => {
+      console.error('Save workorder API error:', error);
+      return { status: 'error', message: 'Failed to save workorder' };
+    });
+};
+
 
 export const confirmPrescanAPI = () => {
   return api.post('/confirm_prescan').then(response => response.data);

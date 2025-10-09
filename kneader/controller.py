@@ -35,6 +35,10 @@ class KneaderController:
         config_parser.read(config_path)
 
         self.config_file_path = config_parser['files']['kneader_json_log_file']
+        self.completed_workorders_dir = config_parser['files'].get(
+            'completed_workorders_dir',
+            os.path.join(os.getcwd(), "completed_workorders")  # fallback default
+        )
         # self.low_temp_threshold = float(config_parser['temperature_thresholds']['low'])
         # self.high_temp_threshold = float(config_parser['temperature_thresholds']['high'])
 
@@ -72,14 +76,14 @@ class KneaderController:
         self.work_order_task = None
         self.hmi_cmd_queue = asyncio.Queue()
         self._prescan_data = None
-        # --- NEW: track scanned items per step globally to avoid local race/visibility issues
+        # --- NEW: track scanned items per step
         self.scanned_items_by_step = {}
         self._just_completed = False
         self._is_paused.set()  # Ensure not paused
         self._resume_event.set()
         self._resumed_from_abort = False
         self.ready_timestamps = {}
-        print("🔄 Controller reset: state=IDLE")
+        print("Controller reset: state=IDLE")
 
     def _handle_gateway_event(self, event: Dict[str, Any]):
         if "tag_name" in event and "value" in event:
@@ -97,7 +101,7 @@ class KneaderController:
             )
         )
 
-    # controller.py
+
 
     def get_full_status(self) -> Dict[str, Any]:
         status = {
@@ -272,7 +276,7 @@ class KneaderController:
 
         scanned_item_ids = self.scanned_items_by_step.setdefault(step_index, set())
 
-        # ✅ If all items for this step were already early scanned → skip waiting, go READY_TO_LOAD
+        # If all items for this step were already early scanned → skip waiting, go READY_TO_LOAD
         if len(scanned_item_ids) == num_items_to_scan:
             self.process_state = "READY_TO_LOAD"
             await self.logger.log(
@@ -295,10 +299,10 @@ class KneaderController:
 
         if len(scanned_item_ids) > 0:
             # Invalid state safety check
-            self.process_state = "ERROR"
-            self.error_message = "Invalid state: entered WAITING_FOR_ITEMS with pre-scanned items (partial)"
+            #self.process_state = "ERROR"
+            #self.error_message = "Invalid state: entered WAITING_FOR_ITEMS with pre-scanned items (partial)"
             await self.logger.log("ERROR", self.error_message, data=self.get_full_status(), is_event=True)
-            return False
+            #return False
 
         # Process item scanning for this step
         while len(scanned_item_ids) < num_items_to_scan:
@@ -411,7 +415,7 @@ class KneaderController:
         if future:
             future.set_result(scan_response)
 
-    # controller.py
+
 
     async def _execute_mixing_process(self, step_index: int) -> bool:
         lid_timeout = getattr(config, 'LID_CLOSE_TIMEOUT_SEC', 30.0)
@@ -478,11 +482,11 @@ class KneaderController:
                     break
                 await asyncio.sleep(0.2)
 
-            # ✅ Mark only THIS step’s items as DONE
+            #  Mark only THIS step’s items as DONE
             for item in self.workorder["steps"][step_index]["items"]:
                 item["live_status"] = "DONE"
 
-            # ✅ Advance to next step or complete
+            # Advance to next step or complete
             if self.current_step_index < len(self.workorder["steps"]) - 1:
                 self.current_step_index += 1
                 next_step = self.workorder["steps"][self.current_step_index]
@@ -506,10 +510,14 @@ class KneaderController:
                         is_event=True
                     )
             else:
-                self.process_state = "PROCESS_COMPLETE"
-                await self.logger.log("INFO", f"Mixing for final step {step_index + 1} completed, process complete",
-                                      data=self.get_full_status(), is_event=True)
-
+                if self.current_step_index == len(self.workorder["steps"]) - 1:
+                    self.process_state = "PROCESS_COMPLETE"
+                    await self.logger.log("INFO", f"Mixing for final step {step_index + 1} completed, process complete",
+                                          data=self.get_full_status(), is_event=True)
+                else:
+                    # This shouldn't happen, but added as safety
+                    await self.logger.log("ERROR", "Invalid state: trying to complete process but not on last step",
+                                          data=self.get_full_status(), is_event=True)
             self._resumed_from_abort = False
             return True
 
@@ -537,7 +545,19 @@ class KneaderController:
             for i, step in enumerate(self.workorder["steps"]):
                 success = await self._process_workorder_step(step, i)
                 if not success:
-                    break
+                    # If a step fails, don't mark as complete - stay in error state
+                    await self.logger.log("ERROR", f"Workorder failed at step {i}. Process stopped.",
+                                          data=self.get_full_status(), is_event=True)
+                    return  # ← Return early, don't mark as complete!
+
+                    # Only mark as complete if ALL steps finished successfully
+                if self.process_state != "ABORTED" and self.process_state != "ERROR":
+                    self.remaining_mix_time = 0
+                    self.process_state = "PROCESS_COMPLETE"
+                    self._just_completed = True
+                    await self.logger.log("INFO", "Work order has finished successfully.",
+                                          data=self.get_full_status(), is_event=False)
+
 
 
 
@@ -603,7 +623,7 @@ class KneaderController:
 
             await asyncio.sleep(1)
 
-    # controller.py
+
 
     async def _handle_abort_command(self):
         if self.process_state in ("MIXING", "WAITING_FOR_ITEMS","READY_TO_LOAD"):
@@ -715,41 +735,41 @@ class KneaderController:
             return {"status": "fail", "message": "Cannot resume - not in ABORTED state"}
 
     async def _handle_complete_abort_command(self):
-        print("🔄 Handling complete_abort command")
+        print("Handling complete_abort command")
         try:
             # Always try to stop hardware regardless of state
             try:
                 await self.gateway.send_command({"action": "write", "tag_name": "wr_motor_control_kn1", "value": 0})
                 await self.gateway.send_command({"action": "write", "tag_name": "wr_lid_status_kn1", "value": 0})
-                print("✅ Hardware stopped: motor=0, lid=0")
+                print("Hardware stopped: motor=0, lid=0")
             except Exception as e:
-                print(f"⚠️ Hardware stop warning: {e}")
+                print(f"Hardware stop warning: {e}")
 
             # Cancel running workorder task if active
             if self.work_order_task and not self.work_order_task.done():
-                print("🔄 Cancelling workorder task")
+                print("Cancelling workorder task")
                 self.work_order_task.cancel()
                 try:
                     await self.work_order_task
                 except asyncio.CancelledError:
-                    print("✅ Workorder task cancelled successfully")
+                    print("Workorder task cancelled successfully")
                 except Exception as e:
-                    print(f"⚠️ Workorder task cancellation warning: {e}")
+                    print(f" Workorder task cancellation warning: {e}")
                 self.work_order_task = None
 
             # Reset everything - COMPLETELY
-            print("🔄 Resetting internal state")
+            print("Resetting internal state")
             self._reset_internal_state()
             self.workorder = None
             self.process_state = "IDLE"
 
-            # 🔥 CRITICAL: Reset all mixing-related state variables
+            #  Reset all mixing-related state variables
             self.mixing_timer_started = False
             self.mixing_start_timestamp = None
             self.remaining_mix_time = 0
             self._resumed_from_abort = False
 
-            # 🔥 Also clear any paused state
+            # Also clear any paused state
             self._is_paused.set()  # Ensure not paused
             self._resume_event.set()
 
@@ -760,11 +780,11 @@ class KneaderController:
                 is_event=True
             )
 
-            print("✅ Complete abort successful, returning status")
+            print("Complete abort successful, returning status")
             return self.get_full_status()
 
         except Exception as e:
-            print(f"❌ Complete abort failed: {e}")
+            print(f"Complete abort failed: {e}")
             self.process_state = "ERROR"
             self.error_message = f"Complete abort failed: {str(e)}"
             await self.logger.log("ERROR", self.error_message, data=self.get_full_status(), is_event=True)
@@ -802,12 +822,12 @@ class KneaderController:
                 total = prescan_status.get('total_items', 0)
                 scanned = prescan_status.get('scanned_count', 0)
 
-                # ✅ Trigger only when *all* items are scanned
+                # Trigger only when *all* items are scanned
                 if total > 0 and scanned == total:
                     await self.logger.log("INFO",
                                           "All prescan items scanned ",
                                           data=self.get_full_status(), is_event=True)
-                    # ✅ Mark prescan as complete in backend state
+                    #  Mark prescan as complete in backend state
                     self.process_state = "PRESCAN_COMPLETE"
 
                     await self.logger.log(
@@ -901,6 +921,29 @@ class KneaderController:
 
                 elif command == "get_status":
                     response = self.get_full_status()
+                elif command == "save_workorder":
+                    try:
+                        # Check prerequisites first
+                        if not self.workorder:
+                            response = {"status": "fail", "message": "No workorder loaded."}
+                        elif self.process_state != "PROCESS_COMPLETE":
+                            response = {"status": "fail", "message": "Cannot save — process not complete."}
+                        else:
+
+                            save_dir = os.path.join(os.getcwd(), "completed_workorders")
+                            os.makedirs(save_dir, exist_ok=True)
+                            filename = f"workorder_{self.workorder.get('name', 'unknown')}_{int(time.time())}.json"
+                            filepath = os.path.join(save_dir, filename)
+                            with open(filepath, "w", encoding="utf-8") as f:
+                                json.dump(self.workorder, f, indent=2)
+                            await self.logger.log("INFO", f"Workorder saved successfully at {filepath}",
+                                                  data=self.get_full_status(), is_event=True)
+
+                            response = {"status": "success", "message": f"Workorder saved to {filepath}"}
+                    except Exception as e:
+                        await self.logger.log("ERROR", f"Save workorder failed: {e}", data=self.get_full_status(),
+                                              is_event=True)
+                        response = {"status": "fail", "message": str(e)}
                 elif command == "confirm_completion":
                     self._reset_internal_state()
                     response = self.get_full_status()
@@ -961,7 +1004,7 @@ class KneaderController:
             is_event=False
         )
 
-        # 🔧 Accept both direct "item_id" and nested "data.barcode"
+
         item_id = (
                 message.get("item_id")
                 or (message.get("data", {}) or {}).get("barcode")
@@ -1081,7 +1124,7 @@ class KneaderController:
                               is_event=False)
 
         if self.process_state == "PROCESS_COMPLETE":
-            # ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Do NOT reset here ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â wait for frontend to confirm
+
             await self.logger.log("INFO", "Workorder reached PROCESS_COMPLETE. Awaiting user confirmation.",
                                   data=self.get_full_status(), is_event=True)
             return

@@ -1,5 +1,6 @@
 <template>
   <div class="dashboard">
+  
 
     <!-- FIRST SCREEN: select batch type -->
     <div class="batch-panel" v-if="!batchType && status.process_state === 'IDLE'">
@@ -305,6 +306,17 @@
     </div>
   </div>
 </div>
+<!-- Save Workorder Popup  -->
+<div class="confirmation-dialog" v-if="showSavePopup">
+  <div class="dialog-content">
+    <h3>Save Workorder</h3>
+    <p>The process is complete. Would you like to save this workorder?</p>
+    <div style="display:flex; gap:10px; justify-content:center; margin-top:1rem;">
+      <button @click="handleSaveWorkorder" class="btn btn-success">SAVE</button>
+      
+    </div>
+  </div>
+</div>
 
     <!-- Process Complete Dialog -->
     <div class="completion-popup" v-if="showCompletionPopup">
@@ -318,6 +330,7 @@
 </template>
 <script>
 import {
+  login,
   getStatus,
   scanItem,
   abortProcess,
@@ -331,6 +344,7 @@ import {
   confirmPrescanAPI,
   confirmCompletion,
   prescanItem,
+  saveWorkorder,
   completeAbortProcess,
    cancelProcess 
 } from '@/api'
@@ -339,6 +353,7 @@ export default {
   name: 'Dashboard',
   data() {
     return {
+      showSavePopup: false,
       showCancelConfirmation: false,
       showCancelProcessConfirmation: false,
       showEarlyScanningWrongItemPopup: false,
@@ -496,7 +511,7 @@ isCancelDisabled() {
     // Restore batch type from backend if available, otherwise keep from localStorage
     this.batchType = statusResp.workorder_type || this.batchType;
 
-    // 🔥 CRITICAL: Determine which screen to show based on state
+    // Determine which screen to show based on state
     if (statusResp.process_state === 'IDLE') {
       // If we have a batch type but no active workorder, show batch number entry screen
       if (this.batchType && !this.workorder) {
@@ -580,6 +595,15 @@ isCancelDisabled() {
     }
   },
   methods: {
+    async handleLogin() {
+      try {
+        const res = await login(this.username, this.password);
+        localStorage.setItem("jwt_token", res.access_token);
+        this.isAuthenticated = true;
+      } catch (err) {
+        this.error = "Invalid ERP credentials";
+      }
+    },
     // Show confirmation popup instead of direct cancellation
   showCancelConfirmationPopup() {
     this.showCancelConfirmation = true;
@@ -738,7 +762,7 @@ async loadBatchByNumber() {
       this.showPrescanning = true;
       this.prescanComplete = false;
       
-      // 🔥 Save batch number to localStorage (already done by watcher, but ensure it's saved)
+      //Save batch number to localStorage (already done by watcher, but ensure it's saved)
       localStorage.setItem('lastBatchNumber', bn);
       
       this.$nextTick(() => { 
@@ -970,7 +994,7 @@ async cancelProcess() {
 
     markPrescanCompleteIfDone() {
   if (this.scannedItemsCount === this.totalItemsCount) {
-    // Show popup instead of flipping the whole UI
+    // Show popup
     this.showPrescanCompletePopup = true;
 
    
@@ -1119,10 +1143,10 @@ closeWrongStagePopup() {
   try {
     const newStatus = await getStatus()
     this.status = newStatus
+    
     if (newStatus.process_state === 'PRESCAN_COMPLETE' && !this.showPrescanCompletePopup) {
-  this.showPrescanCompletePopup = true;
-}
-
+      this.showPrescanCompletePopup = true;
+    }
 
     if (newStatus.process_state === 'WAITING_FOR_ITEMS') {
       this.$nextTick(() => { 
@@ -1134,19 +1158,24 @@ closeWrongStagePopup() {
       this.showPrescanning = true;
     }
 
+    // FIX: Add safety check to prevent premature completion detection
     if (newStatus.just_completed || newStatus.process_state === 'PROCESS_COMPLETE') {
-      if (!this.showCompletionPopup) {
-        console.log("Process complete detected -> showing popup")
-        this.showCompletionPopup = true
+      // Only show save popup if we're actually on the last step
+      const isLastStep = newStatus.current_step_index >= newStatus.total_steps - 1;
+      const allStepsDone = newStatus.steps && newStatus.steps.every(step => 
+        step.items.every(item => item.live_status === 'DONE')
+      );
+      
+      if (!this.showSavePopup && !this.showCompletionPopup && isLastStep && allStepsDone) {
+        console.log("Process complete detected -> showing SAVE popup first");
+        this.showSavePopup = true;
       }
     }
 
   } catch (error) {
     console.error('Failed to update status:', error)
-
-    // 
     this.status = {
-      ...this.status,  // keep old steps, items, etc.
+      ...this.status,
       error_message: 'Failed to update status'
     }
   }
@@ -1329,6 +1358,27 @@ isStepReadyToLoad(stepIndex) {
         console.error('Failed to resume process:', error)
       }
     },
+    async handleSaveWorkorder() {
+  try {
+    const response = await saveWorkorder();
+    if (response.status === 'success') {
+      console.log('Workorder saved successfully:', response.message);
+      this.scanResult = { status: 'success', message: 'Workorder saved successfully!' };
+      this.showSavePopup = false;
+      this.showCompletionPopup = true;
+    } else {
+      console.warn('Failed to save workorder:', response.message);
+      this.scanResult = { status: 'error', message: response.message || 'Failed to save workorder' };
+      // Don't proceed to completion popup if save failed
+    }
+  } catch (err) {
+    console.error('Save workorder API failed:', err);
+    this.scanResult = { status: 'error', message: 'Error saving workorder' };
+  }
+},
+
+
+
     
     confirmProcessComplete() {
   this.showProcessCompletePopup = false;
@@ -1377,7 +1427,28 @@ isStepReadyToLoad(stepIndex) {
 </script>
 
 <style scoped>
-/* (kept your CSS) */
+.login-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  gap: 10px;
+}
+.login-screen input {
+  padding: 8px;
+  width: 220px;
+  font-size: 1rem;
+}
+.login-screen button {
+  padding: 8px 12px;
+  font-size: 1rem;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+}
+
 /* Add styles for the automatic transition message */
 .batch-option {
   border: 2px solid #007bff;
@@ -1409,7 +1480,7 @@ isStepReadyToLoad(stepIndex) {
   border-collapse: collapse;
   margin-top: 1rem;
   text-align: center;
-  border: 2px solid #333; /* Add darker outer border */
+  border: 2px solid #333; 
 }
 
 .prescan-table th,
@@ -1422,7 +1493,7 @@ isStepReadyToLoad(stepIndex) {
 .prescan-table th {
   background-color: #f0f0f0; 
   font-weight: bold;
-  color: #333; /* Darker text for better contrast */
+  color: #333; 
 }
 
 .prescan-table td {
@@ -1496,7 +1567,7 @@ isStepReadyToLoad(stepIndex) {
 .completion-popup {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5); /* dark overlay */
+  background-color: rgba(0, 0, 0, 0.5); 
   display: flex;
   justify-content: center;
   align-items: center;
@@ -1522,7 +1593,7 @@ isStepReadyToLoad(stepIndex) {
   max-width: 400px;
   width: 100%;
   box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-  border: 2px solid #dc3545; /* Red border for abort confirmation */
+  border: 2px solid #dc3545; 
 }
 
 .confirmation-dialog h3 {
@@ -1571,7 +1642,7 @@ isStepReadyToLoad(stepIndex) {
   100% { background-color: yellow; }
 }
 
-/* Ensure the blinking effect overrides other background colors */
+
 .prescan-table tr.blinking-highlight td {
   animation: blinking 1s infinite !important;
 }
