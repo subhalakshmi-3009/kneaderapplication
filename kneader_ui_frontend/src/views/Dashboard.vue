@@ -1,10 +1,86 @@
 <template>
   <div class="dashboard">
   
+<!-- ============ LOGIN SCREEN ============ -->
+<div
+  v-if="!token"
+  class="login-container"
+>
+  <div class="login-card">
+    <!-- Simple Header -->
+    <div class="login-header">
+      
+      <h1 class="login-subtitle">Login to start the process</h1>
+    </div>
 
+    <!-- Login Form -->
+    <div class="login-form">
+      <!-- Username Field -->
+      <div class="input-group">
+        <label for="username" class="input-label">
+          Username
+        </label>
+        <input
+          id="username"
+          v-model="username"
+          type="text"
+          placeholder="Enter your username"
+          class="form-input"
+          @keyup.enter="login"
+        />
+      </div>
+
+      <!-- Password Field with Toggle -->
+      <div class="input-group">
+        <label for="password" class="input-label">
+          Password
+        </label>
+        <div class="password-input-container">
+          <input
+            id="password"
+            v-model="password"
+            :type="showPassword ? 'text' : 'password'"
+            placeholder="Enter your password"
+            class="form-input password-input"
+            @keyup.enter="login"
+          />
+          <button 
+            type="button" 
+            class="password-toggle"
+            @click="showPassword = !showPassword"
+          >
+            <span v-if="showPassword" class="toggle-text">Hide</span>
+            <span v-else class="toggle-text">Show</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Login Button -->
+      <div class="button-container">
+        <button
+          @click="login"
+          class="login-button"
+          :class="{ 'login-button-disabled': !username || !password }"
+          :disabled="!username || !password"
+        >
+          Login
+        </button>
+      </div>
+
+      <!-- Error Message -->
+      <div v-if="error" class="error-message">
+        <p class="error-text">{{ error }}</p>
+      </div>
+    </div>
+  </div>
+</div>
     <!-- FIRST SCREEN: select batch type -->
-    <div class="batch-panel" v-if="!batchType && status.process_state === 'IDLE'">
-      <h2>Select Batch Type</h2>
+     <div v-else>
+  <div class="batch-panel" v-if="!batchType && status.process_state === 'IDLE'">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+      <h2 style="margin: 0;">Select Batch Type</h2>
+      <button @click="logout" class="btn btn-warning">Logout</button>
+    </div>
       <div style="display:flex; gap:20px; justify-content:center; margin-top:1rem;">
         <div class="batch-option" @click="selectBatchType('master')">
           MASTER BATCH
@@ -327,6 +403,7 @@
     </div>
 
   </div>
+</div>
 </template>
 <script>
 import {
@@ -353,6 +430,12 @@ export default {
   name: 'Dashboard',
   data() {
     return {
+    username: "",
+      password: "",
+      showPassword: false,
+      token: localStorage.getItem("token"),
+      error: "",
+      kneaderStatus: {},
       showSavePopup: false,
       showCancelConfirmation: false,
       showCancelProcessConfirmation: false,
@@ -555,7 +638,11 @@ isCancelDisabled() {
   // Load batches/workorders for selection
   await this.loadBatches();
   await this.loadWorkorders();
-  this.startPolling();
+  
+  // ✅ ONLY START POLLING IF USER IS LOGGED IN
+  if (this.token) {
+    this.startPolling();
+  }
 
   this.$nextTick(() => {
     if (this.showBatchSelection && this.$refs.batchInput) {
@@ -595,15 +682,74 @@ isCancelDisabled() {
     }
   },
   methods: {
-    async handleLogin() {
-      try {
-        const res = await login(this.username, this.password);
-        localStorage.setItem("jwt_token", res.access_token);
-        this.isAuthenticated = true;
-      } catch (err) {
-        this.error = "Invalid ERP credentials";
-      }
-    },
+  async login() {
+  this.error = "";
+  try {
+    const res = await login(this.username, this.password);
+    console.log("Login response:", res);
+
+    if (res.token) {
+      // Save token and switch to main app
+      localStorage.setItem("token", res.token);
+      this.token = res.token;
+
+      // Hide login and go to batch selection
+      this.showBatchSelection = false;
+      this.batchType = null;
+      this.status = { process_state: "IDLE" };
+
+      // ✅ START POLLING AFTER LOGIN
+      this.startPolling();
+
+      console.log("✅ Login successful — moving to batch type selection");
+    } else {
+      this.error = "Invalid ERPNext credentials";
+    }
+  } catch (err) {
+    console.error("Login error:", err);
+    this.error = "Login failed. Please check your credentials.";
+  }
+},
+
+  logout() {
+  console.log("Logging out...");
+  
+  // Clear all localStorage items
+  localStorage.removeItem("token");
+  localStorage.removeItem('lastBatchType');
+  localStorage.removeItem('lastBatchNumber');
+  
+  // Reset all component state
+  this.token = null;
+  this.username = "";
+  this.password = "";
+  this.error = "";
+  this.batchType = null;
+  this.enteredBatchNumber = '';
+  this.selectedBatch = null;
+  this.workorder = null;
+  this.showBatchSelection = false;
+  this.showPrescanning = false;
+  this.scannedItems = [];
+  
+  // Reset status
+  this.status = {
+    process_state: 'IDLE',
+    lid_open: true,
+    motor_running: false,
+    current_step_index: -1,
+    current_item_index: -1,
+    mixing_time_remaining: 0,
+    error_message: '',
+    workorder_id: null,
+    total_steps: 0
+  };
+  
+  // ✅ STOP POLLING PROPERLY
+  this.stopPolling();
+  
+  console.log("Logout successful - returned to login screen");
+},
     // Show confirmation popup instead of direct cancellation
   showCancelConfirmationPopup() {
     this.showCancelConfirmation = true;
@@ -762,8 +908,11 @@ async loadBatchByNumber() {
       this.showPrescanning = true;
       this.prescanComplete = false;
       
-      //Save batch number to localStorage (already done by watcher, but ensure it's saved)
+      // Save batch number to localStorage
       localStorage.setItem('lastBatchNumber', bn);
+      
+      // ✅ FORCE STATUS UPDATE TO GET LATEST DATA
+      await this.updateStatus();
       
       this.$nextTick(() => { 
         if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); 
@@ -1648,4 +1797,250 @@ isStepReadyToLoad(stepIndex) {
 }
 
 .btn-debug { background-color:#6c757d; color:white; padding:0.25rem 0.5rem; border:none; border-radius:4px; font-size:0.8rem; margin-top:1rem; }
+/* Login Screen Styles */
+.batch-panel {
+  background-color: white;
+  border-radius: 12px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  border: 2px solid #e5e7eb;
+}
+
+/* Make the login container more prominent */
+.min-h-screen {
+  min-height: 100vh;
+}
+
+/* Larger input fields */
+.batch-panel input {
+  font-size: 1.1rem;
+}
+
+/* Blue button enhancements */
+.batch-panel button:not(:disabled):hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 12px rgba(59, 130, 246, 0.3);
+}
+
+.batch-panel button:active:not(:disabled) {
+  transform: translateY(0);
+}
+.btn-warning {
+  background-color: #ffc107;
+  color: black;
+  border: 2px solid #e0a800;
+}
+
+.btn-warning:hover {
+  background-color: #e0a800;
+  transform: translateY(-1px);
+}
+/* Login Screen Styles */
+.login-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start; /* Changed from center to flex-start */
+  min-height: 100vh;
+  background-color: #f8f9fa;
+  padding: 2rem;
+  padding-top: 4rem; /* Added top padding to move card down slightly from top */
+}
+
+.login-card {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  padding: 3rem;
+  max-width: 400px;
+  width: 100%;
+  border: 2px solid #060606;
+  /* Remove any margin that might be pushing it down */
+  margin: 0;
+}
+
+.login-header {
+  text-align: center;
+  margin-bottom: 2.5rem;
+}
+
+.login-title {
+  font-size: 1.8rem;
+  font-weight: 600;
+  color: #2c3e50;
+  margin-bottom: 0.5rem;
+}
+
+.login-subtitle {
+  color: #101111;
+  font-size: 1rem;
+  margin: 0;
+}
+
+.login-form {
+  space-y: 1.5rem;
+}
+
+.input-group {
+  margin-bottom: 1.5rem;
+}
+
+.input-label {
+  display: block;
+  font-weight: 500;
+  color: #495057;
+  margin-bottom: 0.5rem;
+  font-size: 0.95rem;
+}
+
+.form-input {
+  width: 100%;
+  padding: 0.875rem 1rem;
+  border: 2px solid #e9ecef;
+  border-radius: 8px;
+  font-size: 1rem;
+  transition: all 0.2s ease;
+  background: white;
+  box-sizing: border-box;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: #007bff;
+  box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.1);
+}
+
+.form-input::placeholder {
+  color: #6c757d;
+}
+
+.button-container {
+  margin-top: 2rem;
+  display: flex;
+  justify-content: center;
+}
+
+.login-button {
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 0.875rem 2rem;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  min-width: 120px;
+}
+
+.login-button:hover:not(.login-button-disabled) {
+  background: #0056b3;
+  transform: translateY(-1px);
+}
+
+.login-button:active:not(.login-button-disabled) {
+  transform: translateY(0);
+}
+
+.login-button-disabled {
+  background: #6c757d;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.error-message {
+  background: #f8d7da;
+  border: 1px solid #f5c6cb;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-top: 1.5rem;
+  text-align: center;
+}
+
+.error-text {
+  color: #721c24;
+  margin: 0;
+  font-weight: 500;
+  font-size: 0.95rem;
+}
+
+/* Responsive Design */
+@media (max-width: 480px) {
+  .login-container {
+    padding: 1rem;
+    padding-top: 3rem; /* Slightly less top padding on mobile */
+  }
+  
+  .login-card {
+    padding: 2rem 1.5rem;
+  }
+  
+  .login-title {
+    font-size: 1.5rem;
+  }
+}
+/* Password Input Container */
+.password-input-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.password-input {
+  padding-right: 80px; /* Make space for the toggle button */
+}
+
+.password-toggle {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  color: #495057;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.password-toggle:hover {
+  background: #e9ecef;
+  border-color: #adb5bd;
+}
+
+.password-toggle:active {
+  background: #dee2e6;
+}
+
+.toggle-text {
+  font-weight: 500;
+  font-size: 0.8rem;
+}
+
+/* Ensure the password input doesn't get hidden behind the toggle */
+.form-input:focus {
+  padding-right: 80px; /* Maintain space when focused */
+}
+
+/* Responsive adjustments */
+@media (max-width: 480px) {
+  .password-input {
+    padding-right: 70px;
+  }
+  
+  .password-toggle {
+    padding: 4px 6px;
+    font-size: 0.75rem;
+  }
+  
+  .form-input:focus {
+    padding-right: 70px;
+  }
+}
+
 </style>

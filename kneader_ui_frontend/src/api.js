@@ -8,7 +8,17 @@ const api = axios.create({
   timeout: 10000
 })
 
-
+// === Automatically attach JWT token ===
+api.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('token')
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
+    return config
+  },
+  (error) => Promise.reject(error)
+);
 // Add response interceptor to handle errors
 api.interceptors.response.use(
   (response) => response,
@@ -17,11 +27,20 @@ api.interceptors.response.use(
     throw error
   }
 )
-export const login = (username, password) => {
-  return axios.post('http://127.0.0.1:5000/api/login', { username, password })
-    .then(response => response.data)
-}
+//export const login = (username, password) => {
+  //return axios.post('http://127.0.0.1:5000/api/login', { username, password })
+    //.then(response => response.data)
+//}
 
+// === AUTH ===
+export const login = async (username, password) => {
+  const res = await api.post('/login', { username, password })
+  const { token } = res.data
+  if (token) {
+    localStorage.setItem('token', token)
+  }
+  return res.data
+}
 
 export const getStatus = () => {
   return api.get('/status').then(response => response.data)

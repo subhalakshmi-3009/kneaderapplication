@@ -7,9 +7,20 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import os
 import configparser
+import requests
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required, get_jwt_identity
+)
+
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(app)
+# === JWT CONFIG ===
+app.config["JWT_SECRET_KEY"] = "super-secret-factory-key"  # 🔒 Change for production
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = False  # Token never expires
+jwt = JWTManager(app)
+ERP_BASE_URL = "https://sppmaster.frappe.cloud"
+
 
 HMI_HOST = "localhost"
 HMI_PORT = 6000
@@ -125,13 +136,39 @@ def load_workorders(batch_type="compound"):
             return json.load(f)
     except FileNotFoundError:
         return None
+@app.route("/api/login", methods=["POST"])
+def login():
+    data = request.get_json()
+    username = data.get("username")
+    password = data.get("password")
 
+    try:
+        # Authenticate with ERPNext
+        erp_resp = requests.post(
+            f"{ERP_BASE_URL}/api/method/login",
+            data={"usr": username, "pwd": password},
+            timeout=10
+        )
 
+        print("ERPNext response:", erp_resp.status_code, erp_resp.text)
+
+        # ERPNext returns HTTP 200 even for invalid login, so check content
+        if "Invalid Login" in erp_resp.text or "error" in erp_resp.text.lower():
+            return jsonify({"msg": "Invalid ERPNext credentials"}), 401
+
+        # Success → create our own token
+        token = create_access_token(identity=username)
+        return jsonify({"token": token}), 200
+
+    except Exception as e:
+        print("Login error:", e)
+        return jsonify({"msg": f"ERPNext login failed: {str(e)}"}), 500
 @app.route('/')
 def serve_ui():
     return send_from_directory('static', 'index.html')
 
 @app.route('/api/cancel', methods=['POST'])
+@jwt_required()
 def cancel_process():
     try:
         response = controller.send_command({"command": "cancel"})
@@ -149,6 +186,7 @@ def cancel_process():
 
 
 @app.route('/api/load_workorder', methods=['POST'])
+@jwt_required()
 def load_workorder():
     try:
         data = request.json
@@ -195,6 +233,7 @@ def load_workorder():
 
 
 @app.route('/api/prescan', methods=['POST'])
+@jwt_required()
 def prescan_item():
     try:
         data = request.json
@@ -212,6 +251,7 @@ def prescan_item():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/confirm_prescan', methods=['POST'])
+@jwt_required()
 def confirm_prescan():
     try:
         response = controller.send_command({"command": "confirm_start"})
@@ -224,6 +264,7 @@ def confirm_prescan():
 
 
 @app.route('/api/scan', methods=['POST'])
+@jwt_required()
 def scan_item():
     try:
         data = request.json
@@ -248,6 +289,7 @@ def scan_item():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 @app.route('/api/status', methods=['GET'])
+@jwt_required()
 def get_status():
     try:
         response = controller.send_command({"command": "get_status"})
@@ -259,6 +301,7 @@ def get_status():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/abort', methods=['POST'])
+@jwt_required()
 def abort_process():
     try:
         response = controller.send_command({"command": "abort"})
@@ -270,6 +313,7 @@ def abort_process():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/resume', methods=['POST'])
+@jwt_required()
 def resume_process():
     try:
         response = controller.send_command({"command": "resume"})
@@ -282,6 +326,7 @@ def resume_process():
 
 
 @app.route('/api/complete_abort', methods=['POST'])
+@jwt_required()
 def complete_abort():
     try:
         print("Received complete_abort request from frontend")
@@ -303,6 +348,7 @@ def complete_abort():
         print(f"Complete abort exception: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 @app.route('/api/save_workorder', methods=['POST'])
+@jwt_required()
 def save_workorder():
 
     try:
@@ -320,6 +366,7 @@ def save_workorder():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/confirm_completion', methods=['POST'])
+@jwt_required()
 def confirm_completion():
     try:
         response = controller.send_command({"command": "confirm_completion"})
@@ -328,6 +375,7 @@ def confirm_completion():
         return jsonify({"status": "error", "message": str(e)})
 
 @app.route('/api/reset', methods=['POST'])
+@jwt_required()
 def reset_process():
     try:
         controller.connected = False
