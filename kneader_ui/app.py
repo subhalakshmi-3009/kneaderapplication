@@ -230,6 +230,15 @@ def load_workorder():
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+@app.route('/api/debug/token', methods=['GET'])
+@jwt_required()
+def debug_token():
+    current_user = get_jwt_identity()
+    return jsonify({
+        "status": "success",
+        "message": "Token is valid",
+        "current_user": current_user
+    })
 
 
 @app.route('/api/prescan', methods=['POST'])

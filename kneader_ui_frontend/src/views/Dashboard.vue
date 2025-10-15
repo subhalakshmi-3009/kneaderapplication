@@ -562,28 +562,42 @@ isCancelDisabled() {
   async mounted() {
   console.log('Mounted, checking backend state');
   
-  // Restore saved batch type and batch number from localStorage
+  // Only proceed if user is logged in
+  if (!this.token) {
+    console.log("No token found, staying on login screen");
+    return;
+  }
+  
+  // Test the token first
+  try {
+    console.log("Testing token validity...");
+    const testResponse = await getStatus();
+    console.log("Token is valid, proceeding...");
+  } catch (error) {
+    console.error("Token validation failed:", error);
+    if (error.message.includes('401') || error.message.includes('Missing Authorization')) {
+      console.log("Token invalid or expired, forcing logout");
+      this.logout();
+      return;
+    }
+  }
+  
+  // Rest of your mounted() code...
   const savedType = localStorage.getItem('lastBatchType');
   const savedBatch = localStorage.getItem('lastBatchNumber');
   
   if (savedType) {
     this.batchType = savedType;
-    console.log("Restored saved batch type:", savedType);
   }
   
   if (savedBatch) {
     this.enteredBatchNumber = savedBatch;
-    console.log("Restored saved batch number:", savedBatch);
   }
   
   try {
     const statusResp = await getStatus();
-    console.log("Backend status on reload:", statusResp);
-
-    // Sync frontend UI to backend state
     this.status = statusResp;
     
-    // Only set workorder if backend has steps and we don't already have one
     if (statusResp.steps?.length && !this.workorder) {
       this.workorder = { 
         name: statusResp.workorder_name, 
@@ -591,55 +605,49 @@ isCancelDisabled() {
       };
     }
 
-    // Restore batch type from backend if available, otherwise keep from localStorage
     this.batchType = statusResp.workorder_type || this.batchType;
 
-    // Determine which screen to show based on state
     if (statusResp.process_state === 'IDLE') {
-      // If we have a batch type but no active workorder, show batch number entry screen
       if (this.batchType && !this.workorder) {
         this.showBatchSelection = true;
         this.showPrescanning = false;
-        console.log("Showing batch number entry screen (reload with batch type)");
-      } 
-      // If we have a workorder, show the prescanning screen
-      else if (this.workorder) {
+      } else if (this.workorder) {
         this.showBatchSelection = false;
         this.showPrescanning = true;
-        console.log("Showing prescanning screen (reload with workorder)");
-      }
-      // Otherwise show batch type selection
-      else {
+      } else {
         this.showBatchSelection = false;
         this.showPrescanning = false;
-        console.log("Showing batch type selection screen (fresh start)");
       }
     } else {
-      // If backend is in any other state, show the appropriate screen
       this.showBatchSelection = false;
       this.showPrescanning = true;
-      console.log("Backend has active process, showing prescanning screen");
     }
 
   } catch (err) {
     console.error("Error checking controller state:", err);
-    // On error, fall back to showing batch selection if we have a batch type
+    if (err.response && (err.response.status === 401 || err.response.status === 422)) {
+      this.logout();
+      return;
+    }
     if (this.batchType) {
       this.showBatchSelection = true;
       this.showPrescanning = false;
     }
   }
 
-  console.log('Mounted state - showBatchSelection:', this.showBatchSelection, 
-              'batchType:', this.batchType, 
-              'enteredBatchNumber:', this.enteredBatchNumber,
-              'workorder:', this.workorder);
-
-  // Load batches/workorders for selection
-  await this.loadBatches();
-  await this.loadWorkorders();
+  // Load data with error handling
+  try {
+    await this.loadBatches();
+  } catch (err) {
+    console.error('Failed to load batches:', err);
+  }
   
-  // ✅ ONLY START POLLING IF USER IS LOGGED IN
+  try {
+    await this.loadWorkorders();
+  } catch (err) {
+    console.error('Failed to load workorders:', err);
+  }
+  
   if (this.token) {
     this.startPolling();
   }
@@ -692,6 +700,9 @@ isCancelDisabled() {
       // Save token and switch to main app
       localStorage.setItem("token", res.token);
       this.token = res.token;
+      
+      console.log("Token stored in localStorage:", localStorage.getItem("token"));
+      console.log("Token length:", res.token.length);
 
       // Hide login and go to batch selection
       this.showBatchSelection = false;
@@ -701,7 +712,18 @@ isCancelDisabled() {
       // ✅ START POLLING AFTER LOGIN
       this.startPolling();
 
+      // ✅ Force a status check to update the UI
+      try {
+        await this.updateStatus();
+      } catch (err) {
+        console.error("Initial status check failed:", err);
+      }
+
       console.log("✅ Login successful — moving to batch type selection");
+      console.log("Current state - showBatchSelection:", this.showBatchSelection);
+      console.log("Current state - showPrescanning:", this.showPrescanning);
+      console.log("Current state - batchType:", this.batchType);
+      
     } else {
       this.error = "Invalid ERPNext credentials";
     }
@@ -710,7 +732,6 @@ isCancelDisabled() {
     this.error = "Login failed. Please check your credentials.";
   }
 },
-
   logout() {
   console.log("Logging out...");
   
