@@ -65,10 +65,8 @@ export const getBatches = (batchNumber = '') => {
   return api.get(url).then(r => r.data);
 };
 
-export const loadWorkorder = ({ batchNumber, batchType }) =>
-  api.post('/load_workorder', { batchNumber, batchType })
-    .then(r => r.data)
-    .catch(() => ({ status: 'error', message: 'Failed to load workorder' }));
+export const loadWorkorder = ({ workorder_name, type }) =>
+  api.post('/load_workorder', { workorder_name, type })
 
 export const confirmCompletion = () =>
   api.post('/confirm_completion')
@@ -83,5 +81,20 @@ export const saveWorkorder = () =>
     .catch(() => ({ status: 'error', message: 'Failed to save workorder' }));
 
 export const confirmPrescanAPI = () => api.post('/confirm_prescan').then(r => r.data);
+// === ERPNext Integration ===
+export const getERPWorkorders = () =>
+  api.get('/erp/workorders').then(r => r.data);
+
+export const getERPBOM = (bomName) =>
+  api.get(`/erp/bom/${bomName}`).then(r => r.data);
+
+export const updateERPWorkorder = (workOrder, status = 'Completed', actualQty = 0) =>
+  api.post('/erp/update_workorder', { work_order: workOrder, status, actual_qty: actualQty })
+     .then(r => r.data);
+
+export const createERPBatch = (batchId, item, manufacturingDate) =>
+  api.post('/erp/create_batch', { batch_id: batchId, item, manufacturing_date: manufacturingDate })
+     .then(r => r.data);
+
 
 export default api;

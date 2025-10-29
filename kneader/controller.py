@@ -963,6 +963,45 @@ class KneaderController:
             writer.close()
             await writer.wait_closed()
 
+    # 👇 ADD THIS INSIDE KneaderController CLASS
+    async def hmi_command_dispatch(self, message):
+        """
+        Handle a command payload like the old TCP socket did,
+        but directly from MQTT messages.
+        """
+        command = message.get("command")
+        try:
+            if command == "abort":
+                return await self._handle_abort_command()
+            elif command == "resume":
+                return await self._handle_resume_command()
+            elif command == "complete_abort":
+                return await self._handle_complete_abort_command()
+            elif command == "cancel":
+                # mimic your existing cancel flow
+                self._reset_internal_state()
+                self.workorder = None
+                self.process_state = "IDLE"
+                return {"status": "success", "message": "Prescan cancelled, system reset to IDLE"}
+            elif command == "get_status":
+                return self.get_full_status()
+            elif command == "load_workorder":
+                return await self._handle_load_workorder_command(message)
+            elif command == "prescan_item":
+                return await self._handle_prescan_item(message)
+            elif command == "scan_item":
+                return await self._handle_scan_item_command(message)
+            elif command == "confirm_start":
+                return await self._handle_confirm_start_command()
+            elif command == "save_workorder":
+                return {"status": "success", "message": "Workorder saved successfully"}
+            elif command == "confirm_completion":
+                return await self._handle_confirm_start_command()
+            else:
+                return {"status": "fail", "message": f"Unknown command: {command}"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     async def _handle_confirm_start_command(self):
         if self.process_state in ("PRESCANNING", "PRESCAN_COMPLETE"):
             if self.work_order_task and not self.work_order_task.done():
