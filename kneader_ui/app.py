@@ -18,7 +18,12 @@ import paho.mqtt.client as mqtt
 
 
 app = Flask(__name__, static_folder='static', static_url_path='')
-CORS(app)
+CORS(
+    app,
+    supports_credentials=True,
+    origins=["http://localhost:8000", "http://127.0.0.1:8000"]
+)
+
 # === JWT CONFIG ===
 app.config["JWT_SECRET_KEY"] = "super-secret-factory-key"
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = False
@@ -56,13 +61,13 @@ class ControllerMQTTClient:
     def on_message(self, client, userdata, msg):
         try:
             payload = json.loads(msg.payload.decode())
-            print(f"📩 MQTT Response → {msg.topic}: {payload}")  # 👈 helpful debug log
+            print(f"MQTT Response → {msg.topic}: {payload}")
             self.response = payload
         except json.JSONDecodeError:
-            print(f"⚠️ MQTT Decode Error: invalid JSON from topic {msg.topic}")
+            print(f"MQTT Decode Error: invalid JSON from topic {msg.topic}")
             self.response = {"error": "Invalid JSON payload"}
         except Exception as e:
-            print(f"⚠️ MQTT on_message() exception: {e}")
+            print(f"MQTT on_message() exception: {e}")
             self.response = {"error": str(e)}
 
     def send_command(self, command, timeout=10):
@@ -109,8 +114,8 @@ def load_workorders(batch_type="compound"):
 @app.route("/api/login", methods=["POST"])
 def login():
     data = request.get_json()
-    username = data.get("username")
-    password = data.get("password")
+    username = data.get("username") or data.get("usr")
+    password = data.get("password") or data.get("pwd")
 
     try:
         erp_resp = requests.post(
@@ -141,12 +146,12 @@ def login():
                 "msg": "Access denied. Only System Manager, Batch Operator, or Mill Operator can log in."
             }), 403
 
-        # ✅ Create token (identity must be a string)
+        # Create token (identity must be a string)
         identity = username  # main identity must be string
         additional_claims = {"roles": roles}
         token = create_access_token(identity=identity, additional_claims=additional_claims)
 
-        # ✅ Return only the token
+        # Return only the token
         return jsonify({"token": token}), 200
 
     except Exception as e:
@@ -213,7 +218,7 @@ def load_workorder_from_erp():
                 "workorder_id": workorder_name,
                 "name": workorder.get("production_item") or workorder_name,
                 "steps": [],
-                # 🔹 Add mix/barcode/final item info to workorder metadata
+                # Add mix/barcode/final item info to workorder metadata
                 "mix_barcode": mix_info.get("mix_barcode") if mix_info else None,
                 "mix_item_code": mix_info.get("item_code") if mix_info else None,
                 "bom_name": mix_info.get("bom_name") if mix_info else bom_no,

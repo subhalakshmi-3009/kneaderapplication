@@ -1,9 +1,11 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://127.0.0.1:5000/api'; // or remove /api if not used
+const API_BASE_URL = 'http://192.168.0.102:5000';
+
 
 const api = axios.create({
   baseURL: API_BASE_URL,
+  withCredentials: true,
   timeout: 10000,
 });
 
@@ -35,11 +37,12 @@ api.interceptors.response.use(
 
 // === AUTH ===
 export const login = async (username, password) => {
-  const res = await api.post('/login', { username, password });
-  const token = res.data.token || res.data.access_token;
-  if (token) localStorage.setItem('token', token);
-  return res.data;
-};
+  const res = await api.post('/api/login', {
+    usr: username,
+    pwd: password
+  })
+  return res.data
+}
 
 export const getStatus = () => api.get('/status').then(r => r.data);
 export const scanItem = (barcode) => api.post('/scan', { barcode }).then(r => r.data);
