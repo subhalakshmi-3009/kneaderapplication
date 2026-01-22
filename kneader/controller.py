@@ -1,17 +1,34 @@
-# controller.py
 import asyncio
 import json
 import time
 import os
+import re
 import configparser
 from typing import Dict, Any, Optional, Set
 from Kneader2 import Kneader
 from utils.AsyncJsonLogger import AsyncJsonLogger
 import config
 from gateway_client import AsyncGatewayClient
+from datetime import datetime
+import time
+
+def log_ctrl(msg, req_id=None):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    if req_id:
+        print(f"{ts} [CTRL] [{req_id}] {msg}", flush=True)
+    else:
+        print(f"{ts} [CTRL] {msg}", flush=True)
 
 
 class KneaderController:
+
+    def log_ctrl(msg, req_id=None):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        if req_id:
+            print(f"{ts} [CTRL] [{req_id}] {msg}", flush=True)
+        else:
+            print(f"{ts} [CTRL] {msg}", flush=True)
+
     def __init__(self):
         self._setup_events()
         self._load_config()
@@ -78,6 +95,8 @@ class KneaderController:
         self._prescan_data = None
         # --- NEW: track scanned items per step
         self.scanned_items_by_step = {}
+        self.batch_to_item_map = {}  # spp_batch_number → item_code
+
         self._just_completed = False
         self._is_paused.set()  # Ensure not paused
         self._resume_event.set()
@@ -365,57 +384,66 @@ class KneaderController:
             # Merge next-step items into valid set
             valid_items.update({k: v for k, v in next_step_items_map.items() if k not in valid_items})
 
-        if barcode in valid_items:
-            # Figure out which step this belongs to
+        batch_no = barcode  # clarity
+
+        # 1️⃣ Check batch was prescanned
+        if batch_no not in self.batch_to_item_map:
+            scan_response = {
+                "status": "fail",
+                "message": "Batch not prescanned / unknown batch"
+            }
+            if future:
+                future.set_result(scan_response)
+            return
+
+        # 2️⃣ Resolve item_code locally (OFFLINE)
+        item_code = self.batch_to_item_map[batch_no]
+
+        # 3️⃣ Validate item_code against expected items
+        if item_code in valid_items:
+            # Determine correct step (current or next)
             target_step_index = self.current_step_index
-            if barcode in next_step_items_map:
+            if item_code in next_step_items_map:
                 target_step_index = next_step_index
 
             scanned_set = self.scanned_items_by_step.setdefault(target_step_index, set())
 
-            if barcode not in scanned_set:
-                scanned_set.add(barcode)
+            if item_code not in scanned_set:
+                scanned_set.add(item_code)
 
                 if target_step_index == self.current_step_index:
-                    # Normal scan for current step
-                    scanned_item_ids.add(barcode)
+                    scanned_item_ids.add(item_code)
                     self.current_item_index = len(scanned_item_ids) - 1
-                    msg = f"Item {valid_items[barcode].get('name', barcode)} scanned for current step."
+                    msg = f"Item {item_code} accepted for current step"
                 else:
-                    # Early scan for next step (only mark SCANNED, don’t advance)
                     if target_step_index not in self.ready_timestamps:
                         self.ready_timestamps[target_step_index] = time.time()
-                    msg = f"Item {valid_items[barcode].get('name', barcode)} scanned early for next step."
+                    msg = f"Item {item_code} accepted early for next step"
 
                 scan_response = {
                     "status": "success",
                     "message": msg,
-                    "item_id": barcode,
-                    "step_index": target_step_index,
+                    "item_code": item_code,
+                    "batch_no": batch_no,
+                    "step_index": target_step_index
                 }
+
                 await self.logger.log("INFO", msg, data=self.get_full_status(), is_event=False)
+
             else:
-                scan_response = {"status": "fail", "message": "Item already scanned."}
-                await self.logger.log(
-                    "WARNING", f"Duplicate scan attempt: {barcode}",
-                    data=self.get_full_status(), is_event=False
-                )
+                scan_response = {
+                    "status": "fail",
+                    "message": "Item already scanned"
+                }
+
         else:
             scan_response = {
                 "status": "fail",
-                "message": f"Scanned item {barcode} does not belong to this stage."
+                "message": f"Wrong material. Expected one of {list(valid_items.keys())}, got {item_code}"
             }
-            await self.logger.log(
-                "WARNING",
-                f"Invalid scan for this step: {barcode}",
-                data=self.get_full_status(),
-                is_event=False
-            )
 
         if future:
             future.set_result(scan_response)
-
-
 
     async def _execute_mixing_process(self, step_index: int) -> bool:
         lid_timeout = getattr(config, 'LID_CLOSE_TIMEOUT_SEC', 30.0)
@@ -801,62 +829,63 @@ class KneaderController:
     async def _process_prescan_item(self, cmd, future):
         barcode = cmd["data"].get("barcode", "").strip()
 
-        if not self._prescan_data:
-            if future:
-                future.set_result({"status": "error", "message": "Prescan data not initialized"})
+        if not barcode:
+            future.set_result({
+                "status": "error",
+                "message": "No barcode provided"
+            })
             return
 
-        if barcode in self._prescan_data['all_items']:
-            if barcode not in self._prescan_data['scanned_items']:
-                self._prescan_data['scanned_items'].add(barcode)
-                self._prescan_data['all_items'][barcode]['status'] = 'SCANNED'
+        if not self.session_id:
+            future.set_result({
+                "status": "error",
+                "message": "Session not initialized"
+            })
+            return
 
-                response = {
-                    "status": "success",
-                    "message": f"Item {self._prescan_data['all_items'][barcode]['name']} prescanned",
-                    "prescan_status": self._get_prescan_status(self._prescan_data)
-                }
-                await self.logger.log("INFO", f"Item prescanned: {barcode}", data=response, is_event=False)
-                # Check if all items are scanned and automatically transition
-                prescan_status = self._get_prescan_status(self._prescan_data)
-                total = prescan_status.get('total_items', 0)
-                scanned = prescan_status.get('scanned_count', 0)
-
-                # Trigger only when *all* items are scanned
-                if total > 0 and scanned == total:
-                    await self.logger.log("INFO",
-                                          "All prescan items scanned ",
-                                          data=self.get_full_status(), is_event=True)
-                    #  Mark prescan as complete in backend state
-                    self.process_state = "PRESCAN_COMPLETE"
-
-                    await self.logger.log(
-                        "INFO",
-                        "Prescan stage completed. Waiting for frontend confirmation.",
-                        data=self.get_full_status(),
-                        is_event=True
-                    )
-
-
-            else:
-                # DUPLICATE SCAN - item exists but already scanned
-                response = {
-                    "status": "error",  # Fixed typo: was "erroe"
-                    "message": "Item already scanned",  # Correct message for duplicate
-                    "prescan_status": self._get_prescan_status(self._prescan_data)
-                }
-                await self.logger.log("WARNING", f"Duplicate scan: {barcode}", data=response, is_event=False)
-        else:
-            # WRONG ITEM - item doesn't belong to workorder
-            response = {
-                "status": "error",  # Use "error" for wrong item
-                "message": "Item does not belong to this workorder",  # Correct message for wrong item
-                "prescan_status": self._get_prescan_status(self._prescan_data)
+        # ✅ CALL FLASK → ERP (THIS WAS MISSING)
+        response = await self.call_flask_api(
+            "/api/prescan",
+            {
+                "session_id": self.session_id,
+                "barcode": barcode
             }
-            await self.logger.log("WARNING", f"Invalid item: {barcode}", data=response, is_event=False)
+        )
 
-        if future:
+        # ❌ ERP rejected scan
+        if response.get("status") != "success":
             future.set_result(response)
+            return
+
+        # ✅ ERP approved scan
+        item_code = response.get("item_code")
+        # 🔐 Store mapping locally for offline actual scan
+        self.batch_to_item_map[barcode] = item_code
+
+        # Mirror ERP state locally (UI only)
+        self._prescan_data["scanned_items"].add(item_code)
+        self._prescan_data["all_items"][item_code]["status"] = "SCANNED"
+
+        prescan_status = self._get_prescan_status(self._prescan_data)
+
+        # Auto-complete prescan
+        if prescan_status["scanned_count"] == prescan_status["total_items"]:
+            self.process_state = "PRESCAN_COMPLETE"
+
+            await self.logger.log(
+                "INFO",
+                "Prescan stage completed. Waiting for frontend confirmation.",
+                data=self.get_full_status(),
+                is_event=True
+            )
+
+        future.set_result({
+            "status": "success",
+            "item_code": item_code,
+            "prescan_status": prescan_status,
+            "message": response.get("message")
+        })
+
     async def hmi_client_handler(self, reader, writer):
         peer = writer.get_extra_info("peername")
         try:
@@ -963,13 +992,17 @@ class KneaderController:
             writer.close()
             await writer.wait_closed()
 
-    # 👇 ADD THIS INSIDE KneaderController CLASS
+    # ADD THIS INSIDE KneaderController CLASS
     async def hmi_command_dispatch(self, message):
         """
         Handle a command payload like the old TCP socket did,
         but directly from MQTT messages.
         """
         command = message.get("command")
+        req_id = message.get("request_id", "-")
+
+        start = time.time()
+        log_ctrl(f"Received command '{command}'", req_id)
         try:
             if command == "abort":
                 return await self._handle_abort_command()
@@ -982,7 +1015,7 @@ class KneaderController:
                 self._reset_internal_state()
                 self.workorder = None
                 self.process_state = "IDLE"
-                return {"status": "success", "message": "Prescan cancelled, system reset to IDLE"}
+                return self.get_full_status()
             elif command == "get_status":
                 return self.get_full_status()
             elif command == "load_workorder":
@@ -996,44 +1029,131 @@ class KneaderController:
             elif command == "save_workorder":
                 return {"status": "success", "message": "Workorder saved successfully"}
             elif command == "confirm_completion":
-                return await self._handle_confirm_start_command()
+                self._reset_internal_state()
+                return self.get_full_status()
             else:
                 return {"status": "fail", "message": f"Unknown command: {command}"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+        elapsed = time.time() - start
+        log_ctrl(f"Finished processing '{command}' in {elapsed:.3f}s", req_id)
 
     async def _handle_confirm_start_command(self):
         if self.process_state in ("PRESCANNING", "PRESCAN_COMPLETE"):
             if self.work_order_task and not self.work_order_task.done():
                 return {"status": "fail", "message": "Workorder already running"}
             else:
-                # Directly start workorder here
-                self.work_order_task = asyncio.create_task(self._process_workorder())
-                return {"status": "success", "message": "Prescan confirmed. Starting actual process."}
-        else:
-            return {"status": "fail", "message": f"Confirm not allowed in state {self.process_state}"}
+                 self.work_order_task = asyncio.create_task(self._process_workorder())
+        return {"status": "success", "message": "Prescan confirmed. Starting actual process."}
 
     async def _handle_load_workorder_command(self, message):
-        self.workorder = message["data"]
-        self.process_state = "PRESCANNING"
 
-        # Initialize prescan data structure
-        self._prescan_data = {
-            'all_items': {},
-            'scanned_items': set(),
-            'missing_items': set()
-        }
+        try:
+            raw = message.get("data") or {}
+            normalized = {"name": raw.get("name") or raw.get("workorder_name") or raw.get("batch_no") or raw.get(
+                "workorder_id") or f"WO_{int(time.time())}", "steps": []}
 
-        # Populate all_items from all steps
-        for stage_idx, stage in enumerate(self.workorder['steps'], 1):
-            for item in stage['items']:
-                self._prescan_data['all_items'][item['item_id']] = {
-                    'name': item['name'],
-                    'stage': stage_idx,
-                    'status': 'PENDING'
-                }
+            # Case A: if backend provided sequence_steps
+            if "sequence_steps" in raw and raw.get("sequence_steps"):
+                for idx, s in enumerate(raw["sequence_steps"], 1):
+                    mix_time = s.get("mixing_time") or s.get("mix_time_sec")
+                    # parse numeric seconds if possible (e.g. "120 secs")
+                    mix_sec = None
+                    if mix_time is not None:
+                        if isinstance(mix_time, (int, float)):
+                            mix_sec = int(mix_time)
+                        else:
+                            m = str(mix_time)
+                            found = re.search(r"(\d+)", m)
+                            mix_sec = int(found.group(1)) if found else None
 
-        return self.get_full_status()
+                    items = []
+                    for it in (s.get("items") or []):
+                        if isinstance(it, dict):
+                            item_id = it.get("item_id") or it.get("item_code") or it.get("id") or str(
+                                it.get("item") or "")
+                            name = it.get("name") or it.get("description") or None
+                            required_weight = it.get("required_weight") if "required_weight" in it else None
+                        else:
+                            item_id = str(it)
+                            name = None
+                            required_weight = None
+                        items.append({"item_id": item_id, "name": name, "required_weight": required_weight})
+
+                    normalized["steps"].append({
+                        "step_id": idx,
+                        "mix_time_sec": mix_sec,
+                        "items": items
+                    })
+
+            # Case B: already a workorder shape with steps
+            elif "steps" in raw and raw.get("steps"):
+                for idx, s in enumerate(raw["steps"], 1):
+                    mix_sec = None
+                    if "mix_time_sec" in s and s["mix_time_sec"] is not None:
+                        mix_sec = int(s["mix_time_sec"])
+                    elif "mix_time" in s and s["mix_time"] is not None:
+                        m = str(s["mix_time"])
+                        found = re.search(r"(\d+)", m)
+                        mix_sec = int(found.group(1)) if found else None
+
+                    items = []
+                    for it in (s.get("items") or []):
+                        if isinstance(it, dict):
+                            item_id = it.get("item_id") or it.get("id") or it.get("item_code") or str(
+                                it.get("item") or "")
+                            name = it.get("name") or None
+                            required_weight = it.get("required_weight") if "required_weight" in it else None
+                        else:
+                            item_id = str(it)
+                            name = None
+                            required_weight = None
+                        items.append({"item_id": item_id, "name": name, "required_weight": required_weight})
+
+                    normalized["steps"].append({
+                        "step_id": s.get("step_id") or idx,
+                        "mix_time_sec": mix_sec,
+                        "items": items
+                    })
+            else:
+                # No recognizable steps — return error status
+                await self.logger.log("WARNING", "Load workorder: no steps found in payload", data=raw, is_event=True)
+                return {"status": "fail", "message": "No steps found in workorder payload"}
+
+            # Assign normalized workorder
+            self.workorder = normalized
+            self.process_state = "PRESCANNING"
+
+            # Initialize prescan data structure safely
+            self._prescan_data = {
+                "all_items": {},
+                "scanned_items": set(),
+                "missing_items": set()
+            }
+
+            # Populate all_items from normalized steps
+            for stage_idx, stage in enumerate(self.workorder["steps"], start=1):
+                for item in stage.get("items", []):
+                    item_id = item.get("item_id") if isinstance(item, dict) else str(item)
+                    name = item.get("name") if isinstance(item, dict) else None
+                    self._prescan_data["all_items"][item_id] = {
+                        "name": name,
+                        "stage": stage_idx,
+                        "status": "PENDING"
+                    }
+                    # missing_items initially contains all item_ids
+                    self._prescan_data["missing_items"].add(item_id)
+
+            # Ensure scanned_items is an empty set
+            self._prescan_data["scanned_items"] = set()
+
+            await self.logger.log("INFO", "Workorder loaded and normalized", data=self.get_full_status(), is_event=True)
+            return self.get_full_status()
+
+        except Exception as e:
+            await self.logger.log("ERROR", f"Error in _handle_load_workorder_command: {e}", data=message, is_event=True)
+            # Keep controller stable — return fail status
+            return {"status": "fail", "message": f"Failed to load workorder: {e}"}
 
     async def _handle_scan_item_command(self, message):
         await self.logger.log(

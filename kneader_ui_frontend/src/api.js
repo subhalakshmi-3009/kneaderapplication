@@ -1,12 +1,12 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://192.168.0.102:5000';
-
+//const API_BASE_URL = 'https://shera-undefensible-pseudoindependently.ngrok-free.dev';
+const API_BASE_URL ="http://127.0.0.1:5000";
 
 const api = axios.create({
   baseURL: API_BASE_URL,
   withCredentials: true,
-  timeout: 10000,
+  timeout: 90000,
 });
 
 // === Automatically attach JWT token ===
@@ -44,59 +44,79 @@ export const login = async (username, password) => {
   return res.data
 }
 
-export const getStatus = () => api.get('/status').then(r => r.data);
-export const scanItem = (barcode) => api.post('/scan', { barcode }).then(r => r.data);
-export const abortProcess = () => api.post('/abort').then(r => r.data);
-export const resumeProcess = () => api.post('/resume').then(r => r.data);
+export const getStatus = () => api.get('/api/status').then(r => r.data);
+export const scanItem = (barcode) => api.post('/api/scan', { barcode }).then(r => r.data);
+export const abortProcess = () => api.post('/api/abort').then(r => r.data);
+export const resumeProcess = () => api.post('/api/resume').then(r => r.data);
 
 export const completeAbortProcess = () =>
-  api.post('/complete_abort')
+  api.post('/api/complete_abort')
     .then(r => r.data)
     .catch(() => ({ status: 'error', message: 'API call failed' }));
 
 export const cancelProcess = () =>
-  api.post('/cancel')
+  api.post('/api/cancel')
     .then(r => r.data)
     .catch(() => ({ status: 'error', message: 'Cancel API call failed' }));
 
-export const resetProcess = () => api.post('/reset').then(r => r.data);
-export const getWorkorders = () => api.get('/workorders').then(r => r.data);
-export const checkTransitions = () => api.get('/check_transitions').then(r => r.data);
+export const resetProcess = () => api.post('/api/reset').then(r => r.data);
+export const getWorkorders = () => api.get('/api/workorders').then(r => r.data);
+export const checkTransitions = () => api.get('/api/check_transitions').then(r => r.data);
 
 export const getBatches = (batchNumber = '') => {
-  const url = batchNumber ? `/batches/${batchNumber}` : '/batches';
+  const url = batchNumber ? `/api/batches/${batchNumber}` : '/batches';
   return api.get(url).then(r => r.data);
 };
 
-export const loadWorkorder = ({ workorder_name, type }) =>
-  api.post('/load_workorder', { workorder_name, type })
+// updated: call the working endpoint and return .data
+export const loadWorkorder = ({ batch_no }) =>
+  api.post('/api/load_workorder', { batch_no })
+     .then(r => r.data)
+     .catch(err => { throw err })
+
+     export async function getPrescanState(sessionId) {
+  const res = await api.get('/api/prescan_state', {
+    params: { session_id: sessionId }
+  });
+  return res.data;
+}
+
+
 
 export const confirmCompletion = () =>
-  api.post('/confirm_completion')
+  api.post('/api/confirm_completion')
     .then(r => r.data)
     .catch(() => ({ status: 'error', message: 'Failed to confirm completion' }));
 
-export const prescanItem = (barcode) => api.post('/prescan', { barcode }).then(r => r.data);
+// api.js
+
+export const prescanItem = (barcode, sessionId) => {
+  return api.post('/api/prescan', {
+    barcode,
+    session_id: sessionId
+  }).then(r => r.data);
+};
+
 
 export const saveWorkorder = () =>
-  api.post('/save_workorder')
+  api.post('/api/save_workorder')
     .then(r => r.data)
     .catch(() => ({ status: 'error', message: 'Failed to save workorder' }));
 
-export const confirmPrescanAPI = () => api.post('/confirm_prescan').then(r => r.data);
+export const confirmPrescanAPI = () => api.post('/api/confirm_prescan').then(r => r.data);
 // === ERPNext Integration ===
 export const getERPWorkorders = () =>
-  api.get('/erp/workorders').then(r => r.data);
+  api.get('/api/erp/workorders').then(r => r.data);
 
 export const getERPBOM = (bomName) =>
-  api.get(`/erp/bom/${bomName}`).then(r => r.data);
+  api.get(`/api/erp/bom/${bomName}`).then(r => r.data);
 
 export const updateERPWorkorder = (workOrder, status = 'Completed', actualQty = 0) =>
-  api.post('/erp/update_workorder', { work_order: workOrder, status, actual_qty: actualQty })
+  api.post('/api/erp/update_workorder', { work_order: workOrder, status, actual_qty: actualQty })
      .then(r => r.data);
 
 export const createERPBatch = (batchId, item, manufacturingDate) =>
-  api.post('/erp/create_batch', { batch_id: batchId, item, manufacturing_date: manufacturingDate })
+  api.post('/api/erp/create_batch', { batch_id: batchId, item, manufacturing_date: manufacturingDate })
      .then(r => r.data);
 
 

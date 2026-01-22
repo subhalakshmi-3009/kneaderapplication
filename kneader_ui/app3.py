@@ -1,6 +1,9 @@
 from datetime import datetime
 import time
 import uuid
+from datetime import datetime
+import time
+import uuid
 
 import json
 import threading
@@ -22,32 +25,61 @@ from flask_jwt_extended import (
 )
 import paho.mqtt.client as mqtt
 
-
 app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(
     app,
     supports_credentials=True,
-    origins=["http://localhost:8000", "http://127.0.0.1:8000","https://sppmaster.frappe.cloud","http://localhost:8080","http://mysite.local:8000",
-        ]
+    origins=["http://localhost:8000", "https://shera-undefensible-pseudoindependently.ngrok-free.dev",
+             "http://127.0.0.1:8000", "https://sppmaster.frappe.cloud", "http://localhost:8081",
+             "http://mysite.local:8000",
+             ]
+
 )
 
-# === JWT CONFIG ===
+ALLOWED_ORIGINS = [
+    "https://sppmaster.frappe.cloud",
+    "https://shera-undefensible-pseudoindependently.ngrok-free.dev",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "http://localhost:8080",
+    "http://sppmaster.local:8000",
+]
+
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+
+        response.headers.setdefault(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization"
+        )
+        response.headers.setdefault(
+            "Access-Control-Allow-Methods",
+            "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        )
+    return response
+
+
+# JWT CONFIG
 app.config["JWT_SECRET_KEY"] = "super-secret-factory-key"
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = False
 jwt = JWTManager(app)
 BROKER_HOST = "localhost"
 BROKER_PORT = 1883
 
-ERP_BASE_URL = "https://sppmaster.frappe.cloud"
-# === ERPNext API Integration ===
-ERP_API_KEY = "2ea7819b10b3c86"
-ERP_API_SECRET = "48de0d1ddb4376f"
+ERP_BASE_URL = "http://sppmaster.local:8000"
+# ERPNext API Integration
+ERP_API_KEY = "57f6f2eeee6cb49"
+ERP_API_SECRET = "c681509ef0534d3"
 
 ERP_HEADERS = {
     "Authorization": f"token {ERP_API_KEY}:{ERP_API_SECRET}"
 }
-
-
 
 HMI_HOST = "localhost"
 HMI_PORT = 6000
@@ -56,7 +88,7 @@ log_file = os.path.join(LOG_DIR, "ui_controller.log")
 
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# ---- Global flags for status + batch lookup ----
+# Global flags for status + batch lookup
 BATCH_LOOKUP_IN_PROGRESS = False
 LAST_STATUS_CACHE = None
 LAST_STATUS_TS = 0.0
@@ -115,7 +147,6 @@ class ControllerMQTTClient:
         print(message)
 
 
-
 controller = ControllerMQTTClient()
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -125,7 +156,22 @@ config_path = os.path.join(parent_dir, './kneader/config.ini')
 config = configparser.ConfigParser()
 config.read(config_path)
 compound_workorders_file = config["files"]["compound_workorder_file"]
-master_workorders_file   = config["files"]["master_workorder_file"]
+master_workorders_file = config["files"]["master_workorder_file"]
+
+
+def erp_call_method(method, params=None):
+    """Call a Frappe/ERPNext whitelisted method.---bridge from flask to erpnext"""
+    params = params or {}
+    url = f"{ERP_BASE_URL}/api/method/{method}"
+    log_app(f"Calling ERP method: {url} params={params}")
+    resp = requests.post(url, headers=ERP_HEADERS, json=params, timeout=30)
+    log_app(f"ERP response raw: {resp.status_code} {resp.text}")
+
+    resp.raise_for_status()
+    data = resp.json()
+    # ERPNext wraps return value in "message"
+    return data.get("message", data)
+
 
 def log_app(msg, req_id=None):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -134,6 +180,7 @@ def log_app(msg, req_id=None):
     else:
         print(f"{ts} [FLASK] {msg}", flush=True)
 
+
 def load_workorders(batch_type="compound"):
     file_path = compound_workorders_file if batch_type == "compound" else master_workorders_file
     try:
@@ -141,6 +188,38 @@ def load_workorders(batch_type="compound"):
             return json.load(f)
     except FileNotFoundError:
         return None
+
+
+def _ensure_steps_field(status: dict) -> dict:
+    """
+    Make sure status has a 'steps' array that Vue template (status.steps)
+    can loop over. If 'steps' already exists from controller, keep it.
+    Else, build it from prescan_status.status_by_stage.
+    """
+    # If controller already gave steps, keep them
+    if status.get("steps"):
+        return status
+
+    prescan = status.get("prescan_status") or {}
+    stages = prescan.get("status_by_stage") or {}
+
+    steps = []
+
+    for stage_no_str, stage in sorted(stages.items(), key=lambda kv: int(kv[0])):
+        items = stage.get("items") or []
+        mix_time = stage.get("mix_time")
+
+        steps.append({
+            "step_id": int(stage_no_str),
+            "mix_time_sec": mix_time,
+            "mix_time": mix_time,
+            "items": items,  # each item has item_id, prescan_status, status,
+        })
+
+    status["steps"] = steps
+    return status
+
+
 @app.route("/api/login", methods=["POST"])
 def login():
     data = request.get_json()
@@ -176,7 +255,7 @@ def login():
                 "msg": "Access denied. Only System Manager, Batch Operator, or Mill Operator can log in."
             }), 403
 
-        # Create token (identity must be a string)
+        # Create token
         identity = username  # main identity must be string
         additional_claims = {"roles": roles}
         token = create_access_token(identity=identity, additional_claims=additional_claims)
@@ -191,6 +270,7 @@ def login():
 @app.route('/')
 def serve_ui():
     return send_from_directory('static', 'index.html')
+
 
 @app.route('/api/cancel', methods=['POST'])
 @jwt_required()
@@ -212,137 +292,36 @@ def cancel_process():
 
 @app.route('/api/load_workorder', methods=['POST'])
 @jwt_required()
-def load_workorder_from_erp():
-    # -------- START TIMING --------
-    req_id = str(uuid.uuid4())[:8]  # short request id for tracing
-    start_total = time.time()
-    log_app("START /api/load_workorder", req_id)
+def load_workorder():
+    print("🔥 ENTERED /api/load_workorder")
 
     data = request.get_json()
-    workorder_name = data.get("workorder_final_item")
-    batchType = data.get("type", "compound")
+    batch_no = data.get("batch_no")
+
+    if not batch_no:
+        return jsonify({"status": "fail", "message": "batch_no required"}), 400
 
     try:
+        raw = erp_call_method(
+            "kneader3009.kneader_api.create_kneader_session",
+            {"batch_no": batch_no}
+        )
 
-        batchType = request.args.get("type", "compound")
-        t0 = time.time()
-        log_app(f"Calling ERP for Work Order {workorder_name}", req_id)
+        session_resp = raw.get("message", raw)
 
-
-        workorder_data = erp_get(f"Work Order/{workorder_name}")
-        workorder = workorder_data.get("data", {})
-        t1 = time.time()
-        log_app(f"ERP Work Order fetched in {t1 - t0:.3f}s", req_id)
-        if not workorder:
-            return jsonify({"status": "fail", "message": "Work Order not found in ERPNext"}), 404
-
-        batch_no = workorder.get("batch_no") or workorder_name
-        bom_no = workorder.get("bom_no")
-
-        # --- ERP: BOM ---
-        t2 = time.time()
-        log_app(f"Calling ERP for BOM {bom_no}", req_id)
-
-
-        bom_data = erp_get(f"BOM/{bom_no}")
-        bom = bom_data.get("data", {})
-        bom_items = bom.get("items", [])
-
-        t3 = time.time()
-        log_app(f"ERP BOM fetched in {t3 - t2:.3f}s, items={len(bom_items)}", req_id)
-
-        if not bom_items:
-            log_app("No BOM items found for this Work Order", req_id)
-            return jsonify({"status": "fail", "message": "No BOM items found for this Work Order"}), 404
-
-        t4 = time.time()
-        log_app("Calling get_final_production_item()", req_id)
-
-        # 🔹 Step 3.5 — Get Final Production Item from Mix Barcode Flow
-        mix_info = get_final_production_item()
-
-        t5 = time.time()
-        log_app(f"get_final_production_item() took {t5 - t4:.3f}s", req_id)
-
-        # Build Kneader-compatible workorder JSON
-
-        t6 = time.time()
-        kneader_workorder = {
-            "batch_number": batch_no,
-            "workorder": {
-                "workorder_id": workorder_name,
-                "final_item": workorder.get("production_item") or workorder_name,
-                "sequence_steps": [],
-                # Add mix/barcode/final item info to workorder metadata
-                "mix_barcode": mix_info.get("mix_barcode") if mix_info else None,
-                "mix_item_code": mix_info.get("item_code") if mix_info else None,
-                "bom_final_item": mix_info.get("bom_final_item") if mix_info else bom_no,
-                "final_item": mix_info.get("final_item") if mix_info else workorder.get("production_item")
-            }
-        }
-
-        # Split BOM items into mixing sequence_steps
-        step_size = 3
-        for i in range(0, len(bom_items), step_size):
-            group = bom_items[i:i + step_size]
-            step = {
-                "sequence": (i // step_size) + 1,
-                "mixing_time": 25,
-                "items": []
-            }
-            for itm in group:
-                step["items"].append({
-                    "item_id": itm.get("item_code"),
-                    "name": itm.get("item_name"),
-                    "required_weight": itm.get("qty") or 0
-                })
-            kneader_workorder["workorder"]["steps"].append(step)
-
-        t7 = time.time()
-        log_app(f"Building kneader_workorder JSON took {t7 - t6:.3f}s", req_id)
-
-        t8 = time.time()
-        log_app("Sending command to controller via MQTT", req_id)
-
-        # Send to controller
-        controller_response = controller.send_command({
-            "command": "load_workorder",
-            "data": kneader_workorder["workorder"]
+        return jsonify({
+            "status": "success",
+            "session_id": session_resp["session_id"],
+            "final_item": session_resp["final_item"],
+            "sequence_steps": session_resp["sequence_steps"],
+            "prescan_status": "PRESCAN"
         })
-        t9 = time.time()
-        log_app(f"controller.send_command() took {t9 - t8:.3f}s", req_id)
-
-        t9 = time.time()
-        log_app(f"controller.send_command() took {t9 - t8:.3f}s", req_id)
-
-        # --- TOTAL TIME ---
-        total = time.time() - start_total
-        log_app(f"END /api/load_workorder total={total:.3f}s", req_id)
-
-        # Handle controller response
-        if controller_response and not controller_response.get("error"):
-            return jsonify({
-                "status": "success",
-                "message": f"{batchType.capitalize()} Work Order {workorder_name} loaded successfully",
-                "workorder": kneader_workorder["workorder"]
-            }), 200
-        else:
-            error_msg = controller_response.get("error", "Failed to load workorder into controller") \
-                if controller_response else "Controller not responding"
-            return jsonify({"status": "fail", "message": error_msg}), 500
 
     except Exception as e:
+        print("❌ LOAD_WORKORDER ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-import json
-import requests
-
-ERP_BASE_URL = "https://sppmaster.frappe.cloud"
-ERP_HEADERS = {
-    "Authorization": "token 2ea7819b10b3c86:48de0d1ddb4376f",
-    "Content-Type": "application/json"
-}
 
 
 def erp_get(doctype, params=None, use_method=False, token=None):
@@ -351,7 +330,6 @@ def erp_get(doctype, params=None, use_method=False, token=None):
 
     params = params or {}
 
-
     encoded_params = {}
     for k, v in params.items():
         if isinstance(v, (dict, list)):
@@ -359,13 +337,12 @@ def erp_get(doctype, params=None, use_method=False, token=None):
         else:
             encoded_params[k] = v
 
-
     headers = {
         "Authorization": f"token {ERP_API_KEY}:{ERP_API_SECRET}",
         "Content-Type": "application/json"
     }
 
-    # === Select correct ERPNext endpoint ===
+    # =Select correct ERPNext endpoint =
     if use_method:
         url = f"{ERP_BASE_URL}/api/method/frappe.client.get_list"
         encoded_params["doctype"] = doctype
@@ -396,11 +373,14 @@ def erp_post(endpoint, data):
     resp = requests.post(url, headers=ERP_HEADERS, json=data)
     return resp.json()
 
+
 def erp_put(endpoint, data):
     """PUT request to ERPNext"""
     url = f"{ERP_BASE_URL}/api/resource/{endpoint}"
     resp = requests.put(url, headers=ERP_HEADERS, json=data)
     return resp.json()
+
+
 def _extract_list(resp):
     """Extract list from ERPNext responses (data/message)."""
     return resp.get("data") or resp.get("message") or []
@@ -428,7 +408,6 @@ def _extract_item(row):
         if "item" in k.lower() and v:
             return str(v).strip()
     return None
-
 
 
 def get_final_production_item(token=None, manual_batch=None):
@@ -476,7 +455,7 @@ def get_final_production_item(token=None, manual_batch=None):
 
         first_entry = data[0]
 
-        # ✅ Extract batch number
+        # Extract batch number
         batch_no = None
         if "batch_no" in first_entry and first_entry.get("batch_no"):
             batch_no = first_entry.get("batch_no")
@@ -485,13 +464,13 @@ def get_final_production_item(token=None, manual_batch=None):
                 batch_no = first_entry["items"][0].get("batch_no")
 
         if not batch_no:
-            log_app("❌ batch_no not found in Stock Entry")
+            log_app("batch_no not found in Stock Entry")
             log_app(f"Entry data: {first_entry}")
             return None
 
         log_app(f"Step 1 → Batch No: {batch_no}")
 
-        # ✅ SAFE Item Code extraction (NO SECOND ERP CALL)
+        # SAFE Item Code extraction (NO SECOND ERP CALL)
         item_code_full = None
 
         if "item_code" in first_entry and first_entry.get("item_code"):
@@ -501,18 +480,18 @@ def get_final_production_item(token=None, manual_batch=None):
                 item_code_full = first_entry["items"][0].get("item_code")
 
         if not item_code_full:
-            log_app("❌ item_code not found in first Stock Entry result")
+            log_app("item_code not found in first Stock Entry result")
             log_app(f"Entry data: {first_entry}")
             return None
 
-        log_app(f"✅ Item Code extracted without 2nd ERP call: {item_code_full}")
+        log_app(f"Item Code extracted without 2nd ERP call: {item_code_full}")
 
-        # ✅ Extract prefix for BOM
+        # Extract prefix for BOM
         prefix_match = re.search(r"B[_-]?\d+", item_code_full)
         item_code_prefix = prefix_match.group(0) if prefix_match else item_code_full.split()[0]
         log_app(f"🔹 Extracted Prefix for BOM: {item_code_prefix}")
 
-        # ✅ STEP 3 → Find BOM
+        #  STEP 3 → Find BOM
         t2 = time.time()
         boms = erp_get("BOM", {
             "filters": [
@@ -543,12 +522,12 @@ def get_final_production_item(token=None, manual_batch=None):
             bom_data = boms.get("data") or boms.get("message")
 
         if not bom_data:
-            log_app(f"❌ No BOM found for item={item_code_prefix}")
+            log_app(f"No BOM found for item={item_code_prefix}")
             return None
 
         final_item = bom_data[0]["item"]
 
-        log_app(f"✅ get_final_production_item() TOTAL {time.time() - func_start:.3f}s (final_item={final_item})")
+        log_app(f"get_final_production_item() TOTAL {time.time() - func_start:.3f}s (final_item={final_item})")
 
         return {
             "batch_no": batch_no,
@@ -561,7 +540,8 @@ def get_final_production_item(token=None, manual_batch=None):
         log_app(f"Error in get_final_production_item: {e}")
         return None
 
-#helper function to parse the batch number
+
+# helper function to parse the batch number
 
 def parse_batch_date(batch_no):
     year = int("20" + batch_no[:2])  # 25 -> 2025
@@ -580,6 +560,7 @@ def parse_batch_date(batch_no):
     first_day_prev = prev_month_last_day.replace(day=1)
 
     return first_day_prev.date(), current_date.date()
+
 
 def find_mixing_sequence_for_final_item_app(final_item=None, batch_no=None, token=None):
     """
@@ -611,7 +592,7 @@ def find_mixing_sequence_for_final_item_app(final_item=None, batch_no=None, toke
             "fields": ["name"],
             "limit_page_length": 1
         },
-        use_method=True,    # IMPORTANT: use frappe.client.get_list so child filter works
+        use_method=True,
         token=token
     )
 
@@ -685,12 +666,9 @@ def find_mixing_sequence_for_final_item_app(final_item=None, batch_no=None, toke
     }
 
 
-
-
 @app.route("/api/debug/final_item", methods=["GET"])
 @jwt_required()
 def debug_final_item():
-
     auth_header = request.headers.get('Authorization', '')
     if auth_header.startswith('Bearer '):
         token = auth_header.split(' ')[1]
@@ -700,13 +678,11 @@ def debug_final_item():
             "message": "Invalid authorization header"
         }), 401
 
-
     batch_no = request.args.get("batch_no", None)
     if batch_no:
         print(f"Manual batch number received: {batch_no}")
     else:
         print("No manual batch number provided — using automatic mode")
-
 
     result = get_final_production_item(token=token, manual_batch=batch_no)
 
@@ -722,6 +698,7 @@ def debug_final_item():
             "message": "Could not fetch final production item. Check ERPNext data or filters."
         }), 200
 
+
 @app.route('/api/debug/token', methods=['GET'])
 @jwt_required()
 def debug_token():
@@ -732,24 +709,86 @@ def debug_token():
         "current_user": current_user
     })
 
+@app.route("/api/create_session", methods=["POST"])
+@jwt_required()
+def create_session():
+    try:
+        data = request.get_json()
+        batch_no = data.get("batch_no")
+
+        if not batch_no:
+            return jsonify({"status": "fail", "message": "batch_no required"}), 400
+
+        # Call ERP (Frappe) to create session
+        resp = erp_call_method(
+            "kneader3009.kneader_api.create_kneader_session",
+            {"batch_no": batch_no}
+        )
+
+        return jsonify({
+            "status": "success",
+            "session_id": resp.get("session_id")
+        })
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 
 @app.route('/api/prescan', methods=['POST'])
 @jwt_required()
 def prescan_item():
     try:
-        data = request.json
-        barcode = data.get('barcode')
-        if not barcode:
-            return jsonify({"status": "fail", "message": "No barcode provided"})
-        response = controller.send_command({"command": "prescan_item", "data": {"barcode": barcode}})
+        data = request.get_json()
+        print("📦 PRESCAN REQUEST:", data)
+        barcode = data.get("barcode")
+        session_id = data.get("session_id")
+        print("🆔 SESSION:", session_id)
+        print("📦 BARCODE:", barcode)
+        if not barcode or not session_id:
+            return jsonify({"status": "fail", "message": "Missing barcode or session_id"}), 400
+
+        payload = {
+            "session_id": session_id,
+            "spp_batch_number": barcode
+        }
+
+        print("➡️ SENDING TO FRAPPE:")
+        print("METHOD: kneader3009.kneader_api.prescan_item")
+        print("PAYLOAD:", payload)
+
+        resp = erp_call_method(
+            "kneader3009.kneader_api.prescan_item",
+            payload
+        )
+
+        print("⬅️ FRAPPE RESPONSE:", resp)
+        return jsonify(resp)
 
 
-        if response:
-            return jsonify(response)
-        else:
-            return jsonify({"status": "error", "message": "No response from controller"})
+
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/prescan_state', methods=['GET'])
+@jwt_required()
+def get_prescan_state():
+    try:
+        session_id = request.args.get("session_id")
+        if not session_id:
+            return jsonify({"status": "fail", "message": "session_id required"}), 400
+
+        resp = erp_call_method(
+            "kneader3009.kneader_api.get_kneader_prescan_state",
+            {"session_id": session_id}
+        )
+
+        return jsonify(resp)
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 
 @app.route('/api/confirm_prescan', methods=['POST'])
 @jwt_required()
@@ -759,7 +798,8 @@ def confirm_prescan():
         if response and not response.get("error"):
             return jsonify(response)
         else:
-            return jsonify({"status": "fail", "message": response.get("error", "Failed to confirm prescan") if response else "Failed to confirm prescan"})
+            return jsonify({"status": "fail", "message": response.get("error",
+                                                                      "Failed to confirm prescan") if response else "Failed to confirm prescan"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -770,25 +810,45 @@ def scan_item():
     try:
         data = request.json
         barcode = data.get('barcode')
+
         if not barcode:
-            return jsonify({"status": "fail", "message": "No barcode provided"})
-
-        # Get current status
-        status_response = controller.send_command({"command": "get_status"})
-        current_state = status_response.get("process_state", "IDLE") if status_response else "IDLE"
-
-        if current_state == "PRESCANNING":
-            return prescan_item()
-        elif current_state in ("WAITING_FOR_ITEMS", "MIXING"):
-            scan_response = controller.send_command({"command": "scan_item", "data": {"barcode": barcode}})
-            return jsonify(scan_response)
-        else:
             return jsonify({
                 "status": "fail",
-                "message": f"Cannot scan in current state: {current_state}. Please wait for the current operation to complete."
-            })
+                "message": "No barcode provided"
+            }),400
+
+        # Always ask controller what state we are in
+        status = controller.send_command({"command": "get_status"})
+        state = status.get("process_state", "IDLE")
+
+        # 🚨 Prescan must be EXPLICIT
+        #if state == "PRESCANNING":
+            #return jsonify({
+                #"status": "fail",
+                #"message": "Prescan is active. Use /api/prescan for prescanning."
+            #})
+
+        # ✅ Actual scan (OFFLINE)
+        if state in ("WAITING_FOR_ITEMS", "MIXING"):
+            return jsonify(
+                controller.send_command({
+                    "command": "scan_item",
+                    "data": {"barcode": barcode}
+                })
+            )
+
+        return jsonify({
+            "status": "fail",
+            "message": f"Scan not allowed in state: {state}"
+        })
+
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
 @app.route('/api/status', methods=['GET'])
 @jwt_required()
 def get_status():
@@ -798,22 +858,22 @@ def get_status():
 
         # 1) If a heavy batch lookup is running, just return last known status
         if BATCH_LOOKUP_IN_PROGRESS and LAST_STATUS_CACHE is not None:
-            return jsonify({
-                **LAST_STATUS_CACHE,
-                "_note": "cached_status_while_batch_loading"
-            })
+            status = {**LAST_STATUS_CACHE, "_note": "cached_status_while_batch_loading"}
+            status = _ensure_steps_field(status)
+            return jsonify(status)
 
         # 2) Throttle calls: if UI calls faster than 2/sec, reuse cached result
         if LAST_STATUS_CACHE is not None and (now - LAST_STATUS_TS) < 0.5:
-            return jsonify(LAST_STATUS_CACHE)
+            status = _ensure_steps_field(dict(LAST_STATUS_CACHE))
+            return jsonify(status)
 
-        # 3) Normal case: actually ask controller
         response = controller.send_command({"command": "get_status"})
 
         if response and not response.get("error"):
             LAST_STATUS_CACHE = response
             LAST_STATUS_TS = now
-            return jsonify(response)
+            status = _ensure_steps_field(dict(response))
+            return jsonify(status)
         else:
             msg = response.get("error", "Controller not responding") if response else "Controller not responding"
             return jsonify({
@@ -836,6 +896,7 @@ def abort_process():
             return jsonify({"status": "fail", "message": response.get("error", "Failed to abort")})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route('/api/resume', methods=['POST'])
 @jwt_required()
@@ -872,10 +933,11 @@ def complete_abort():
     except Exception as e:
         print(f"Complete abort exception: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route('/api/save_workorder', methods=['POST'])
 @jwt_required()
 def save_workorder():
-
     try:
         response = controller.send_command({"command": "save_workorder"})
         if response and not response.get("error"):
@@ -889,6 +951,7 @@ def save_workorder():
             return jsonify({"status": "fail", "message": error_msg})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route('/api/confirm_completion', methods=['POST'])
 @jwt_required()
@@ -922,6 +985,8 @@ def reset_process():
             return jsonify({"status": "fail", "message": "Reset failed", "data": response})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route('/api/erp/workorders', methods=['GET'])
 @jwt_required()
 def erp_get_workorders():
@@ -981,79 +1046,67 @@ def erp_create_batch():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/find_mixing_sequence", methods=["GET", "POST"])
 def api_find_mixing_sequence():
-    global BATCH_LOOKUP_IN_PROGRESS
-    req_start = time.time()
-    BATCH_LOOKUP_IN_PROGRESS = True
     log_app("=== /api/find_mixing_sequence START ===")
+    req_start = time.time()
+
     try:
+        # 1) Read input from frontend
         data = request.get_json(silent=True) or {}
-
+        batch_no = request.args.get("batch_no") or data.get("batch_no")
         final_item = request.args.get("final_item") or data.get("final_item")
-        batch_no= request.args.get("batch_no")   or data.get("batch_no")
 
-        # If caller provided batch_no but no final_item → resolve it
-        if not final_item and batch_no:
-            mix_info = get_final_production_item(manual_batch=batch_no)
-            if not mix_info:
-                log_app("find_mixing_sequence: get_final_production_item() returned None")
-                return jsonify({"error": f" '{batch_no}'"}), 404
+        if not batch_no and not final_item:
+            return jsonify({"success": False, "error": "Provide 'batch_no' or 'final_item'"}), 400
 
-            final_item = mix_info.get("final_item")
-            if not final_item:
-                log_app("find_mixing_sequence: mix_info had no final_item")
-                return jsonify({"error": f"Batch '{batch_no}' did not resolve to a final_item"}), 404
-
-        if not final_item:
-            log_app("find_mixing_sequence: neither final_item nor batch_no provided")
-            return jsonify({"error": "Provide either 'final_item' or 'batch_no'"}), 400
-
-        # Get mixing sequence
-        seq_start = time.time()
-        out = find_mixing_sequence_for_final_item_app(final_item=final_item, batch_no=batch_no)
-        log_app(f"find_mixing_sequence_for_final_item_app() took {time.time() - seq_start:.3f}s")
-        if isinstance(out, dict) and out.get("error"):
-            return jsonify(out), 404
-
-        # ADD BATCH NUMBER TO RESPONSE
-        if batch_no:
-            out["batch_no"] = batch_no
-            #2) Build payload in the "legacy" shape that controller understands
-            controller_workorder = {
-                "batch_no": out.get("batch_no"),
-                "final_item": out.get("final_item"),
-                "sequence_steps": out.get("sequence_steps", [])
+        # 2) Call ERPNext single whitelisted method
+        erp_out = erp_call_method(
+            "kneader3009.kneader_api.get_mixing_sequence",
+            {
+                "batch_no": batch_no,
+                "final_item": final_item,
             }
+        )
+        log_app(f"ERP OUT RAW: {erp_out}")
 
-            # 3) Tell controller to load this workorder
-            ctrl_start = time.time()
-            controller_response = controller.send_command({
-                "command": "load_workorder",
-                "data": controller_workorder
-            })
+        # Frappe returns {"message": {...}}, unwrap it
+        if isinstance(erp_out, dict) and "message" in erp_out:
+            erp_data = erp_out["message"]
+        else:
+            erp_data = erp_out
 
-            log_app(f"controller.load_workorder took {time.time() - ctrl_start:.3f}s")
 
-            # 4) Attach controller response (optional – frontend can ignore it)
-            out["controller_response"] = controller_response
+        controller_workorder = {
+            "batch_no": batch_no,
+            "final_item": erp_data.get("final_item"),
+            "sequence_steps": erp_data.get("sequence_steps", []),
+        }
+
+        # 4) Send workorder to controller
+        ctrl_start = time.time()
+        controller_response = controller.send_command({
+            "command": "load_workorder",
+            "data": controller_workorder,
+        })
+        log_app(f"Controller load_workorder took {time.time() - ctrl_start:.3f}s")
+
+        # 5) Attach controller response & return to frontend
+        erp_data["controller_response"] = controller_response
+
         log_app(f"=== /api/find_mixing_sequence DONE in {time.time() - req_start:.3f}s ===")
-
-        return jsonify(out), 200
+        return jsonify(erp_out), 200
 
     except Exception as e:
         log_app(f"/api/find_mixing_sequence exception: {e}")
-        return jsonify({"error": "Server error while finding mixing sequence"}), 500
-    finally:
-        BATCH_LOOKUP_IN_PROGRESS = False
-        total = time.time() - req_start
-        log_app(f"=== /api/find_mixing_sequence DONE in {total:.3f}s ===")
-
-
-
-
-
+        return jsonify({
+            "success": False,
+            "error": "Server error while finding mixing sequence",
+            "detail": str(e),
+        }), 500
 
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000, host='0.0.0.0')
+

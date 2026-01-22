@@ -173,7 +173,8 @@
           </tr>
         </thead>
         <tbody>
-  <template v-for="(step, stepIndex) in status.steps" :key="step.step_id || stepIndex">
+ <template v-for="(step, stepIndex) in (workorder?.steps || [])" :key="step.step_id || stepIndex">
+
     <tr :class="{ 'blinking-highlight': isNextStep(stepIndex) }">
       <td :rowspan="step.items.length">{{ stepIndex + 1 }}</td>
       <td>{{ step.items[0].item_id }}</td>
@@ -189,20 +190,18 @@
       </td>
 
       <td>
-        <span v-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'SCANNED'" style="color: green;">
-          SCANNED
-        </span>
-        <span v-else-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'PENDING'" >
-          PENDING
-        </span>
-        <span v-else-if="getItemStatus(step.items[0].item_id).toUpperCase() === 'DONE'" 
-        :style="{ color: status.process_state === 'PRESCANNING' ? 'green' : 'gray', fontWeight: 'bold' }">
+  <span
+    v-if="getItemStatus(step.items[0].item_id) === 'done'"
+    style="color: green; font-weight: bold;"
+  >
     DONE
   </span>
-        <span v-else>
-          {{ getItemStatus(step.items[0].item_id).toUpperCase() }}
-        </span>
-      </td>
+
+  <span v-else>
+    PENDING
+  </span>
+</td>
+
 
       <td>
         <span v-if="stepIndex === status.current_step_index + 1 && step.items[0].live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
@@ -233,20 +232,18 @@
       <td>{{ item.item_id }}</td>
 
       <td>
-        <span v-if="getItemStatus(item.item_id).toUpperCase() === 'SCANNED'" style="color: green;">
-          SCANNED
-        </span>
-        <span v-else-if="getItemStatus(item.item_id).toUpperCase() === 'PENDING'" >
-          PENDING
-        </span>
-        <span v-else-if="getItemStatus(item.item_id).toUpperCase() === 'DONE'" 
-        :style="{ color: status.process_state === 'PRESCANNING' ? 'green' : 'gray', fontWeight: 'bold' }">
+  <span
+    v-if="getItemStatus(item.item_id) === 'done'"
+    style="color: green; font-weight: bold;"
+  >
     DONE
   </span>
-        <span v-else>
-          {{ getItemStatus(item.item_id).toUpperCase() }}
-        </span>
-      </td>
+
+  <span v-else>
+    PENDING
+  </span>
+</td>
+
 
       <td>
         <span v-if="stepIndex === status.current_step_index + 1 && item.live_status === 'SCANNED'" style="color: orange; font-weight: bold;">
@@ -278,21 +275,22 @@
       </table>
 
       <!-- Scanner Panel -->
-      <div class="scanner-panel">
+    <div class="scanner-panel">
         <!-- Prescan Input -->
-        <div v-if="status.process_state === 'PRESCANNING'">
-          <h3>Scan Item (Prescan)</h3>
-          <input
-            type="text"
-            v-model="barcode"
-            placeholder="Scan item barcode (prescan)"
-            @keyup.enter="handlePrescan"
-            ref="barcodeInput"
-          />
-        </div>
+                <div v-if="!actualScanning">
+            <h3>Scan Item (Prescan)</h3>
+            <input
+              type="text"
+              v-model="barcode"
+              placeholder="Scan item barcode (prescan)"
+              @keyup.enter="handlePrescan"
+              ref="barcodeInput"
+            />
+          </div>
 
-        <!-- Actual Scan Input -->
-        <div v-else-if="status.process_state === 'WAITING_FOR_ITEMS' || status.process_state === 'MIXING'">
+
+
+        <div v-else-if="actualScanning">
           <h3>Scan Item (Actual)</h3>
           <input
             type="text"
@@ -302,6 +300,7 @@
             ref="barcodeInput"
           />
         </div>
+
        
 
 
@@ -346,6 +345,7 @@
         <button @click="closeEarlyScanningWrongItemPopup" class="btn btn-primary">OK</button>
       </div>
     </div>
+    
 <div class="confirmation-dialog" v-if="showDuplicateScanPopup">
   <div class="dialog-content">
     <h3>Duplicate Scanning!</h3>
@@ -433,7 +433,8 @@ export default {
     username: "",
       password: "",
       showPassword: false,
-      token: localStorage.getItem("token"),
+      token: localStorage.getItem("token")||null,
+      showLogin: !localStorage.getItem("token"),
       error: "",
       kneaderStatus: {},
       showSavePopup: false,
@@ -445,6 +446,7 @@ export default {
       batchType: null,  // "master" or "compound"
       showPrescanCompletePopup: false,
       showCompletionPopup: false,
+      prescanAwaitingConfirmation: false,
       showWrongItemPopup: false,
       wrongItemMessage: '',
       showWrongStagePopup: false,
@@ -455,6 +457,8 @@ export default {
       selectedBatch: null,
       workorder: null,
       showBatchSelection: true,
+      sessionId: null,
+
       showPrescanning: false,
       prescanResults: {}, 
       showDuplicateScanPopup: false,
@@ -484,7 +488,10 @@ export default {
       statusInterval: null,
       transitionInterval: null,
       showingCompletion: false,
-      autoTransitionTimeout: null
+      autoTransitionTimeout: null,
+
+      hasShownSavePopup: false,
+      hasShownCompletionPopup: false
     }
   },
   computed: {
@@ -561,18 +568,22 @@ isCancelDisabled() {
   },
   async mounted() {
   console.log('Mounted, checking backend state');
+  this.token = localStorage.getItem("token");
   
   // Only proceed if user is logged in
   if (!this.token) {
     console.log("No token found, staying on login screen");
+    //this.showLogin = true;
     return;
   }
   
   // Test the token first
   try {
     console.log("Testing token validity...");
-    const testResponse = await getStatus();
+    await getStatus();
+    //const testResponse = await getStatus();
     console.log("Token is valid, proceeding...");
+    //this.showLogin = false;
   } catch (error) {
     console.error("Token validation failed:", error);
     if (error.message.includes('401') || error.message.includes('Missing Authorization')) {
@@ -598,12 +609,43 @@ isCancelDisabled() {
     const statusResp = await getStatus();
     this.status = statusResp;
     
-    if (statusResp.steps?.length && !this.workorder) {
-      this.workorder = { 
-        name: statusResp.workorder_name, 
-        steps: statusResp.steps 
-      };
-    }
+    // convert "120 secs" → 120
+function parseSeconds(mixingTime) {
+  if (mixingTime == null) return null;
+  if (typeof mixingTime === 'number') return Math.floor(mixingTime);
+  const m = String(mixingTime).match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+if (!this.workorder) {
+
+  // CASE 1: backend already returns workorder-style steps
+  if (statusResp.steps?.length) {
+    this.workorder = {
+      name: statusResp.workorder_name,
+      steps: statusResp.steps
+    };
+  }
+
+  // CASE 2: backend returns sequence_steps (your current format)
+  else if (statusResp.sequence_steps?.length) {
+    const steps = statusResp.sequence_steps.map((s, idx) => ({
+      step_id: idx + 1,
+      mix_time_sec: parseSeconds(s.mixing_time),
+      items: (s.items || []).map(it => ({
+        item_id: String(it),
+        name: null,
+        required_weight: null
+      }))
+    }));
+
+    this.workorder = {
+      name: statusResp.workorder_name || `Workorder ${statusResp.batch_no || ''}`,
+      steps
+    };
+  }
+}
+
 
     this.batchType = statusResp.workorder_type || this.batchType;
 
@@ -906,46 +948,104 @@ async loadBatchByNumber() {
   console.log('loadBatchByNumber called with:', this.enteredBatchNumber);
   const bn = (this.enteredBatchNumber || '').trim();
   if (!bn) return;
+
+  // 🔁 New batch: reset completion popups & flags
+  this.showSavePopup = false;
+  this.showCompletionPopup = false;
+  this.hasShownSavePopup = false;
+  this.hasShownCompletionPopup = false;
+
   try {
-    const response = await loadWorkorder({
-      batchNumber: bn,
-      batchType: this.batchType   
-    });
-    if (response && response.status === 'error') {
-      this.scanResult = { status: 'error', message: response.message || 'Failed to load batch' };
+    // <-- send payload the backend expects
+    const response = await loadWorkorder({ batch_no: bn });
+    
+
+    console.log('[DEBUG] loadWorkorder response:', response);
+    // ✅ Store session ID for prescan
+    this.sessionId = response.session_id;
+    console.log("Session ID:", this.sessionId);
+
+    if (!this.sessionId) {
+      this.scanResult = { status: 'error', message: 'Session ID not received' };
       return;
     }
+
+    // unify error handling (old style or new style)
+    if (response && (response.error || response.status === 'error')) {
+      const msg = response.error || response.message || 'Failed to load batch';
+      this.scanResult = { status: 'error', message: msg };
+      return;
+    }
+
+    // --- Unified success handling: accept either workorder OR sequence_steps ---
     if (response && response.workorder) {
-      // Clear frontend state
+      // backend already returned a workorder shape
       this.scannedItems = [];
       this.prescanResults = {};
-      
-      // Set new workorder
       this.workorder = response.workorder;
-      this.selectedBatch = { batch_number: bn, name: response.workorder.name || bn };
-      
-      // Update screen state
-      this.showBatchSelection = false;
-      this.showPrescanning = true;
-      this.prescanComplete = false;
-      
-      // Save batch number to localStorage
-      localStorage.setItem('lastBatchNumber', bn);
-      
-      // ✅ FORCE STATUS UPDATE TO GET LATEST DATA
-      await this.updateStatus();
-      
-      this.$nextTick(() => { 
-        if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); 
-      });
-    } else {
-      this.scanResult = { status: 'error', message: response.message || 'Failed to load workorder' };
+      const returnedBatch = response.batch_number || bn;
+      this.selectedBatch = { batch_number: returnedBatch, name: response.workorder.name || returnedBatch };
     }
+    else if (response && response.sequence_steps) {
+      // backend returned sequence_steps — convert to workorder.steps
+      function parseSeconds(mixingTime) {
+        if (mixingTime == null) return null;
+        if (typeof mixingTime === 'number') return Math.floor(mixingTime);
+        const m = String(mixingTime).match(/(\d+)/);
+        return m ? parseInt(m[1], 10) : null;
+      }
+
+      const steps = (response.sequence_steps || []).map((s, idx) => ({
+        step_id: idx + 1,
+        mix_time_sec: parseSeconds(s.mixing_time),
+        items: (s.items || []).map(it => ({ item_id: String(it), name: null, required_weight: null }))
+      }));
+
+      // apply into UI state exactly like existing flow
+      this.scannedItems = [];
+      this.prescanResults = {};
+      this.workorder = { name: response.workorder?.name || `Workorder ${response.batch_no || bn}`, steps };
+      
+  // ✅ CRITICAL FIX — initialize prescan status
+  this.workorder.steps.forEach(step => {
+    step.items.forEach(item => {
+      this.prescanResults[item.item_id] = 'pending';
+    });
+  });
+      this.selectedBatch = {
+    batch_number: bn,
+    name: this.workorder.name
+  };
+}
+
+    else {
+      // Unexpected response shape or error
+      const msg = response && (response.message || response.error) ? (response.message || response.error) : 'Failed to load workorder';
+      this.scanResult = { status: 'error', message: msg };
+      return;
+    }
+
+    // Continue the existing UI flow after successful load
+    this.showBatchSelection = false;
+    this.showPrescanning = true;
+    this.prescanComplete = false;
+
+    // Save batch number to localStorage
+    localStorage.setItem('lastBatchNumber', this.selectedBatch.batch_number || bn);
+
+    // ✅ FORCE STATUS UPDATE TO GET LATEST DATA
+    await this.updateStatus();
+
+    this.$nextTick(() => {
+      if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus();
+    });
+
   } catch (err) {
     console.error('Failed to load batch:', err);
     this.scanResult = { status: 'error', message: 'Failed to load batch' };
   }
 },
+
 async completeAbortProcess() {
   console.log('Complete Abort button clicked');
   try {
@@ -1003,18 +1103,11 @@ closeEarlyScanningWrongItemPopup() {
         if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); 
       });
     },
-    getItemStatus(itemId) {
-  // strictly prescan status only
-  if (this.status.prescan_status && this.status.prescan_status.status_by_stage) {
-    for (let stage in this.status.prescan_status.status_by_stage) {
-      const item = this.status.prescan_status.status_by_stage[stage].items.find(i => i.item_id === itemId);
-      if (item) {
-        return item.prescan_status.toLowerCase(); // "scanned" / "pending"
-      }
-    }
-  }
-  return 'pending';
+ getItemStatus(itemCode) {
+  return this.prescanResults[itemCode] || 'pending';
 },
+
+
 
 
 
@@ -1036,91 +1129,89 @@ closeEarlyScanningWrongItemPopup() {
 
   return 'waiting';
 },
-getItemStatus(itemId) {
-  if (this.status.process_state === 'PRESCANNING') {
-    if (this.status.prescan_status && this.status.prescan_status.status_by_stage) {
-      for (let stage in this.status.prescan_status.status_by_stage) {
-        const item = this.status.prescan_status.status_by_stage[stage].items.find(i => i.item_id === itemId);
-        if (item) {
+//getItemStatus(itemId) {
+  //if (this.status.process_state === 'PRESCANNING') {
+    //if (this.status.prescan_status && this.status.prescan_status.status_by_stage) {
+      //for (let stage in this.status.prescan_status.status_by_stage) {
+        //const item = this.status.prescan_status.status_by_stage[stage].items.find(i => i.item_id === itemId);
+        //if (item) {
           // map "scanned" → "done"
-          if (item.prescan_status.toLowerCase() === 'scanned') {
-            return 'done';
-          }
-          return item.prescan_status.toLowerCase();
-        }
-      }
-    }
-    return 'pending';
-  }
+          //if (item.prescan_status.toLowerCase() === 'scanned') {
+            //return 'done';
+          //}
+          //return item.prescan_status.toLowerCase();
+        //}
+      //}
+    //}
+    //return 'pending';
+  //}
 
   // After prescan confirmed, everything should stay as "done"
-  if (this.status.prescan_complete || this.showPrescanCompletePopup === false) {
-    return 'done';
-  }
+  //if (this.status.prescan_complete || this.showPrescanCompletePopup === false) {
+    //return 'done';
+  //}
 
-  return 'pending';
-},
+  //return 'pending';
+//},
 
    
-
-    async handlePrescan() {
+async handlePrescan() {
   if (!this.barcode.trim()) return;
+
+  if (!this.sessionId) {
+    this.scanResult = {
+      status: 'error',
+      message: 'Session not initialized. Please load batch first.'
+    };
+    return;
+  }
+
   try {
-    const result = await prescanItem(this.barcode.trim());
+    const result = await prescanItem(
+      this.barcode.trim(),
+      this.sessionId
+    );
+
     if (result && result.status === 'success') {
-      this.prescanResults[this.barcode.trim()] = 'done';
-      if (!this.scannedItems.includes(this.barcode.trim())) {
-        this.scannedItems.push(this.barcode.trim());
-      }
-      this.markPrescanCompleteIfDone();
+      this.prescanResults[result.item_code] = 'done';
       this.scanResult = result;
-    } else if (result && result.status === 'error') {
-      // Check if it's a duplicate scan error
-      if (result.message && result.message.includes('already scanned')) {
-        // Show duplicate scan popup
-        this.duplicateScanMessage = result.message || 'This item has already been scanned.';
+
+      // ✅ THIS IS THE KEY FIX
+      if (result.prescan_complete === true) {
+        this.prescanComplete = true;
+        this.prescanAwaitingConfirmation = true;
+        this.showPrescanCompletePopup = true;
+        return;
+      }
+    }
+    else if (result && result.status === 'error') {
+      if (result.message?.includes('already scanned')) {
+        this.duplicateScanMessage = result.message;
         this.showDuplicateScanPopup = true;
         this.scanResult = null;
       } else {
-        // Show wrong item popup
-        this.wrongItemMessage = result.message || 'This item does not belong to the current workorder.';
+        this.wrongItemMessage = result.message;
         this.showWrongItemPopup = true;
         this.scanResult = null;
       }
-    } else {
+    }
+    else {
       this.scanResult = result;
     }
-    
+
     this.barcode = '';
-    this.$nextTick(() => { if (this.$refs.barcodeInput) this.$refs.barcodeInput.focus(); });
+    this.$nextTick(() => this.$refs.barcodeInput?.focus());
+
   } catch (error) {
     console.error('Failed to prescan item:', error);
-    this.scanResult = { 
-      status: 'error', 
-      message: 'Scan failed: ' + (error.response?.data?.error || error.message) 
+    this.scanResult = {
+      status: 'error',
+      message: 'Scan failed: ' + (error.response?.data?.error || error.message)
     };
   }
 },
-// Keep cancelBatchSelection method for batch selection screen
-    cancelBatchSelection() {
-      console.log("Cancel batch selection clicked");
-      
-      // Reset frontend state only (no API call needed)
-      this.batchType = null;
-      this.enteredBatchNumber = '';
-      this.selectedBatch = null;
-      this.workorder = null;
-      this.scannedItems = [];
-      
-      // Remove localStorage
-      localStorage.removeItem('lastBatchType');
-      localStorage.removeItem('lastBatchNumber');
-      
-      // Show first screen (batch type selection)
-      this.showBatchSelection = false;
-      
-      console.log("Batch selection cancelled - back to batch type selection");
-    },
+
+
 async cancelProcess() {
   try {
     console.log("Cancel button clicked");
@@ -1216,8 +1307,14 @@ closeWrongStagePopup() {
   try {
     const response = await confirmPrescanAPI();
     if (response && response.status === 'success') {
+      this.prescanAwaitingConfirmation = false;
       
       this.showPrescanCompletePopup = false;
+
+      // 🔄 SWITCH MODE HERE
+      this.prescanComplete = true;
+      this.actualScanning = true;
+      this.showPrescanning = false;
 
       // force prescan column to "done"
       this.status.prescan_complete = true;
@@ -1336,11 +1433,13 @@ closeWrongStagePopup() {
         step.items.every(item => item.live_status === 'DONE')
       );
       
-      if (!this.showSavePopup && !this.showCompletionPopup && isLastStep && allStepsDone) {
-        console.log("Process complete detected -> showing SAVE popup first");
-        this.showSavePopup = true;
-      }
-    }
+      if (!this.hasShownSavePopup && isLastStep && allStepsDone) {
+            console.log("Process complete detected -> showing SAVE popup (once per batch)");
+            this.showSavePopup = true;
+            this.hasShownSavePopup = true;   // 
+          }
+        }
+
 
   } catch (error) {
     console.error('Failed to update status:', error)
@@ -1536,6 +1635,7 @@ isStepReadyToLoad(stepIndex) {
       this.scanResult = { status: 'success', message: 'Workorder saved successfully!' };
       this.showSavePopup = false;
       this.showCompletionPopup = true;
+      this.hasShownCompletionPopup = true;
     } else {
       console.warn('Failed to save workorder:', response.message);
       this.scanResult = { status: 'error', message: response.message || 'Failed to save workorder' };
@@ -1583,6 +1683,8 @@ isStepReadyToLoad(stepIndex) {
       this.showPrescanning = false
       this.workorder = null
       this.enteredBatchNumber = ''
+      this.hasShownSavePopup = false
+      this.hasShownCompletionPopup = false
     } else {
       console.error("Completion confirm failed:", response.message)
     }
@@ -2065,3 +2167,7 @@ isStepReadyToLoad(stepIndex) {
 }
 
 </style>
+
+
+
+

@@ -1,5 +1,6 @@
-import { createRouter, createWebHashHistory } from 'vue-router'   // ✅ fixed import
+import { createRouter, createWebHashHistory } from 'vue-router'
 import Dashboard from '../views/Dashboard.vue'
+import Dashboard3 from '../views/Dashboard3.vue'
 
 const routes = [
   {
@@ -10,7 +11,7 @@ const routes = [
 ]
 
 const router = createRouter({
-  history: createWebHashHistory(),   // ✅ matches import
+  history: createWebHashHistory(),
   routes
 })
 
