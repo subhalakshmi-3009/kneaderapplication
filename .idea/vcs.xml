@@ -2,6 +2,8 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/kneader" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/kneader/kneaderrestructured" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/kneader/test-repo-2" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/kneader_ui_frontend" vcs="Git" />
   </component>

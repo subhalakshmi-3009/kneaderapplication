@@ -30,8 +30,8 @@ CORS(
     app,
     supports_credentials=True,
     origins=["http://localhost:8000", "https://shera-undefensible-pseudoindependently.ngrok-free.dev",
-             "http://127.0.0.1:8000", "https://sppmaster.frappe.cloud", "http://localhost:8080",
-             "http://mysite.local:8000",
+             "http://127.0.0.1:8000", "https://sppmaster.frappe.cloud", "http://localhost:8081",
+             "http://mysite.local:8000","http://localhost:8080","chrome-extension://*"
              ]
 
 )
@@ -75,7 +75,7 @@ BROKER_PORT = 1883
 ERP_BASE_URL = "http://sppmaster.local:8000"
 # ERPNext API Integration
 ERP_API_KEY = "57f6f2eeee6cb49"
-ERP_API_SECRET = "3f254aad7991e5b"
+ERP_API_SECRET = "c681509ef0534d3"
 
 ERP_HEADERS = {
     "Authorization": f"token {ERP_API_KEY}:{ERP_API_SECRET}"
@@ -294,10 +294,9 @@ def cancel_process():
 @jwt_required()
 def load_workorder():
     print("🔥 ENTERED /api/load_workorder")
+
     data = request.get_json()
-    print("📦 REQUEST DATA:", data)
     batch_no = data.get("batch_no")
-    print("📌 BATCH NO:", batch_no)
 
     if not batch_no:
         return jsonify({"status": "fail", "message": "batch_no required"}), 400
@@ -307,46 +306,20 @@ def load_workorder():
             "kneader3009.kneader_api.create_kneader_session",
             {"batch_no": batch_no}
         )
-        print("🧾 ERP RAW RESPONSE:", raw)
 
-        if isinstance(raw, dict) and "message" in raw:
-            session_resp = raw["message"]
-        else:
-            session_resp = raw
-
-        print("📨 ERP MESSAGE:", session_resp)
-
-        print("🆔 SESSION ID:", session_resp.get("session_id"))
-
-        # session_resp must contain session_id
-        if not session_resp or not session_resp.get("session_id"):
-            return jsonify({
-                "status": "fail",
-                "message": "Failed to create session"
-            }), 500
+        session_resp = raw.get("message", raw)
 
         return jsonify({
             "status": "success",
             "session_id": session_resp["session_id"],
-            "final_item": session_resp.get("final_item"),
-            "mixing_sequence": session_resp.get("mixing_sequence"),
-            "sequence_steps": session_resp.get("sequence_steps"),
+            "final_item": session_resp["final_item"],
+            "sequence_steps": session_resp["sequence_steps"],
+            "prescan_status": "PRESCAN"
         })
 
-
     except Exception as e:
-
         print("❌ LOAD_WORKORDER ERROR:", str(e))
-
-        return jsonify({
-
-            "status": "error",
-
-            "message": str(e)
-
-        }), 500
-
-
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 
@@ -793,8 +766,28 @@ def prescan_item():
         return jsonify(resp)
 
 
+
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/prescan_state', methods=['GET'])
+@jwt_required()
+def get_prescan_state():
+    try:
+        session_id = request.args.get("session_id")
+        if not session_id:
+            return jsonify({"status": "fail", "message": "session_id required"}), 400
+
+        resp = erp_call_method(
+            "kneader3009.kneader_api.get_kneader_prescan_state",
+            {"session_id": session_id}
+        )
+
+        return jsonify(resp)
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 
 @app.route('/api/confirm_prescan', methods=['POST'])
@@ -817,25 +810,43 @@ def scan_item():
     try:
         data = request.json
         barcode = data.get('barcode')
+
         if not barcode:
-            return jsonify({"status": "fail", "message": "No barcode provided"})
-
-        # Get current status
-        status_response = controller.send_command({"command": "get_status"})
-        current_state = status_response.get("process_state", "IDLE") if status_response else "IDLE"
-
-        if current_state == "PRESCANNING":
-            return prescan_item()
-        elif current_state in ("WAITING_FOR_ITEMS", "MIXING"):
-            scan_response = controller.send_command({"command": "scan_item", "data": {"barcode": barcode}})
-            return jsonify(scan_response)
-        else:
             return jsonify({
                 "status": "fail",
-                "message": f"Cannot scan in current state: {current_state}. Please wait for the current operation to complete."
-            })
+                "message": "No barcode provided"
+            }),400
+
+        # Always ask controller what state we are in
+        status = controller.send_command({"command": "get_status"})
+        state = status.get("process_state", "IDLE")
+
+        # 🚨 Prescan must be EXPLICIT
+        #if state == "PRESCANNING":
+            #return jsonify({
+                #"status": "fail",
+                #"message": "Prescan is active. Use /api/prescan for prescanning."
+            #})
+
+        # ✅ Actual scan (OFFLINE)
+        if state in ("WAITING_FOR_ITEMS", "MIXING"):
+            return jsonify(
+                controller.send_command({
+                    "command": "scan_item",
+                    "data": {"barcode": barcode}
+                })
+            )
+
+        return jsonify({
+            "status": "fail",
+            "message": f"Scan not allowed in state: {state}"
+        })
+
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 
 @app.route('/api/status', methods=['GET'])
